@@ -1,0 +1,16 @@
+# Herdr Worktree Plugin Configuration
+
+# Normalize Jira-style branch names (e.g., ticket-123 → TICKET-123)
+# When enabled, branches matching pattern prefix-NUMBER will have
+# the prefix uppercased automatically.
+normalize_jira_prefix = true
+
+[keybindings]
+# Key to confirm selection and open worktree
+confirm = "enter"
+
+# Key to cancel and close picker
+cancel = "esc"
+
+# Key to toggle remote branches visibility
+toggle_remotes = "alt+r"

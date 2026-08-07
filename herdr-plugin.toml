@@ -1,0 +1,21 @@
+id = "herdr-worktree"
+name = "Herdr Worktree"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Interactive picker for creating and switching to Git worktrees in Herdr"
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+[[actions]]
+id = "open"
+title = "New worktree"
+contexts = ["workspace", "global"]
+command = ["./target/release/herdr-worktree", "open"]
+
+[[panes]]
+id = "picker"
+title = "Worktree Picker"
+placement = "overlay"
+command = ["./target/release/herdr-worktree", "ui"]
