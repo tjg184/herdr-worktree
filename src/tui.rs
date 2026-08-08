@@ -387,18 +387,6 @@ fn run_confirm_dialog(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, sta
 fn draw_confirm_ui(frame: &mut Frame, statusline: &str) {
     let size = frame.area();
 
-    // Full-screen block with border
-    let block = Block::default()
-        .title(Line::from(vec![
-            Span::styled("Remove worktree?", Style::default().add_modifier(Modifier::BOLD)),
-        ]))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-
-    frame.render_widget(&block, size);
-
-    let inner = block.inner(size);
-
     // Vertically center content with flexible spacing
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -409,7 +397,7 @@ fn draw_confirm_ui(frame: &mut Frame, statusline: &str) {
             Constraint::Length(1),    // buttons
             Constraint::Fill(1),      // flexible space below
         ])
-        .split(inner);
+        .split(size);
 
     // Statusline (worktree info)
     let status_para = Paragraph::new(statusline)
@@ -426,4 +414,32 @@ fn draw_confirm_ui(frame: &mut Frame, statusline: &str) {
     ]))
     .alignment(Alignment::Center);
     frame.render_widget(buttons, layout[3]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn confirmation_ui_leaves_the_title_to_herdr() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw_confirm_ui(frame, "repo: branch")).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.get(x, y).symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("repo: branch"));
+        assert!(rendered.contains("[y] Remove"));
+        assert!(!rendered.contains("Remove worktree?"));
+    }
 }
