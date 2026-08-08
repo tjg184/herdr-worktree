@@ -14,8 +14,20 @@ title = "New worktree"
 contexts = ["workspace", "global"]
 command = ["./target/release/herdr-worktree", "open"]
 
+[[actions]]
+id = "remove"
+title = "Remove worktree"
+contexts = ["workspace"]
+command = ["./target/release/herdr-worktree", "remove"]
+
 [[panes]]
 id = "picker"
 title = "Worktree Picker"
 placement = "overlay"
 command = ["./target/release/herdr-worktree", "ui"]
+
+[[panes]]
+id = "confirm-remove"
+title = "Remove worktree?"
+placement = "overlay"
+command = ["./target/release/herdr-worktree", "confirm-remove"]

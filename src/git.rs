@@ -15,6 +15,26 @@ pub fn resolve_repo_root(start_dir: &str) -> Option<PathBuf> {
     Some(PathBuf::from(path))
 }
 
+pub fn get_primary_worktree(repo_root: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", repo_root, "worktree", "list", "--porcelain"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.starts_with("worktree ") {
+            let path = line.strip_prefix("worktree ")?;
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
 pub fn normalize_branch_name(branch: &str, enabled: bool) -> String {
     if !enabled {
         return branch.to_string();

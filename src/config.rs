@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Config {
     #[serde(default = "default_true")]
     pub normalize_jira_prefix: bool,
@@ -10,7 +10,7 @@ pub struct Config {
     pub keybindings: Keybindings,
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Keybindings {
     #[serde(default = "default_confirm")]
     pub confirm: String,

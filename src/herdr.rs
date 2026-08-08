@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::env;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 pub fn herdr_bin() -> String {
     env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".into())
@@ -29,13 +29,48 @@ pub fn run_herdr<const N: usize>(args: [&str; N]) -> Result<(), String> {
     }
 }
 
-pub fn open_plugin_pane(plugin: &str, entrypoint: &str) -> Result<(), String> {
-    run_herdr([
-        "plugin", "pane", "open",
-        "--plugin", plugin,
-        "--entrypoint", entrypoint,
-        "--focus"
-    ])
+pub fn open_plugin_pane_with_cwd(plugin: &str, entrypoint: &str, cwd: &str) -> Result<(), String> {
+    let status = Command::new(herdr_bin())
+        .args([
+            "plugin", "pane", "open",
+            "--plugin", plugin,
+            "--entrypoint", entrypoint,
+            "--env", &format!("HERDR_WORKTREE_CWD={}", cwd),
+            "--focus"
+        ])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("herdr exited with {status}"))
+    }
+}
+
+pub fn open_confirm_remove_pane(plugin: &str, env_vars: &[(&str, &str)]) -> Result<(), String> {
+    let mut args: Vec<String> = vec![
+        "plugin".to_string(),
+        "pane".to_string(),
+        "open".to_string(),
+        "--plugin".to_string(),
+        plugin.to_string(),
+        "--entrypoint".to_string(),
+        "confirm-remove".to_string(),
+        "--focus".to_string(),
+    ];
+    for (key, value) in env_vars {
+        args.push("--env".to_string());
+        args.push(format!("{}={}", key, value));
+    }
+    let status = Command::new(herdr_bin())
+        .args(&args)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("herdr exited with {status}"))
+    }
 }
 
 pub fn focus_plugin_pane(pane_id: &str) -> Result<(), String> {
@@ -60,6 +95,22 @@ pub fn get_plugin_pane_id(pane_json: &Value, label: &str) -> Option<String> {
     .and_then(|p| p.get("pane_id")?.as_str().map(String::from))
 }
 
+pub fn get_any_plugin_pane_id(pane_json: &Value, label: &str) -> Option<String> {
+    let panes = pane_json.pointer("/result/panes")?.as_array()?;
+    panes.iter().find(|p| {
+        p.get("label").and_then(|v| v.as_str()) == Some(label)
+    })
+    .and_then(|p| p.get("pane_id")?.as_str().map(String::from))
+}
+
+pub fn workspace_close(workspace_id: &str) -> Result<(), String> {
+    run_herdr(["workspace", "close", workspace_id])
+}
+
+pub fn show_notification(title: &str, body: &str) -> Result<(), String> {
+    run_herdr(["notification", "show", title, "--body", body])
+}
+
 pub fn worktree_open(repo_root: &str, path: &str, focus: bool) -> Result<Value, String> {
     let mut args = vec![
         "worktree", "open",
@@ -81,4 +132,84 @@ pub fn worktree_open(repo_root: &str, path: &str, focus: bool) -> Result<Value, 
         return Err(String::from_utf8_lossy(&out.stderr).to_string());
     }
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+}
+
+// Get own pane ID from HERDR_PLUGIN_CONTEXT_JSON env var
+pub fn get_own_pane_id_from_env() -> Option<String> {
+    env::var("HERDR_PLUGIN_CONTEXT_JSON")
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("pane_id")?.as_str().map(String::from))
+}
+
+/// Get workspace context from HERDR_PLUGIN_CONTEXT_JSON env var.
+/// Returns (workspace_id, cwd) tuple when available.
+pub fn get_action_context_from_env() -> Option<(String, String)> {
+    env::var("HERDR_PLUGIN_CONTEXT_JSON")
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| {
+            let workspace_id = v.get("workspace_id")?.as_str()?;
+            // Try workspace_cwd first, then focused_pane_cwd, then fall back
+            let cwd = v.get("workspace_cwd")
+                .and_then(|x| x.as_str())
+                .or_else(|| v.get("focused_pane_cwd").and_then(|x| x.as_str()))?;
+            Some((workspace_id.to_string(), cwd.to_string()))
+        })
+}
+
+// Get focused workspace ID from herdr snapshot
+pub fn get_focused_workspace_id(snapshot: &Value) -> Option<String> {
+    snapshot
+        .pointer("/result/snapshot/focused_workspace_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+// Get CWD for a given workspace from herdr snapshot
+// Looks up workspace_id in the workspaces array and returns worktree.checkout_path
+pub fn get_workspace_cwd_from_snapshot(snapshot: &Value, workspace_id: &str) -> Option<String> {
+    let workspaces = snapshot.pointer("/result/snapshot/workspaces")?.as_array()?;
+    let workspace = workspaces.iter().find(|w| {
+        w.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace_id)
+    })?;
+    let worktree = workspace.get("worktree")?;
+    worktree.get("checkout_path")?.as_str().map(String::from)
+}
+
+// Get the CWD of the current workspace from pane list JSON:
+// 1. Find focused pane's workspace
+// 2. Find a "shell" pane in that workspace -> use its foreground_cwd
+// 3. Fall back to any pane in that workspace
+pub fn get_workspace_cwd(pane_json: &Value) -> Option<String> {
+    let panes = pane_json.pointer("/result/panes")?.as_array()?;
+    
+    // Get focused pane's workspace
+    let focused = panes.iter().find(|p| {
+        p.get("focused").and_then(|v| v.as_bool()) == Some(true)
+    })?;
+    let workspace_id = focused.get("workspace_id")?.as_str()?;
+    
+    // Find a shell pane in that workspace
+    let shell_pane = panes.iter().find(|p| {
+        p.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace_id)
+            && p.get("label").and_then(|v| v.as_str()) == Some("shell")
+    });
+    
+    if let Some(pane) = shell_pane {
+        return pane.get("foreground_cwd")
+            .or_else(|| pane.get("cwd"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+    }
+    
+    // Fall back to any pane in the workspace
+    let any_pane = panes.iter().find(|p| {
+        p.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace_id)
+    })?;
+    
+    any_pane.get("foreground_cwd")
+        .or_else(|| any_pane.get("cwd"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
