@@ -30,8 +30,10 @@ git clone <repo-url> ~/dev/herdr-worktree
 cd ~/dev/herdr-worktree
 herdr plugin link $(pwd)
 
-# Or install from GitHub
-herdr plugin install <github-org>/<repo>@<version>
+# Or install a release from GitHub
+<!-- x-release-please-start-version -->
+herdr plugin install tjg184/herdr-worktree --ref v0.1.0
+<!-- x-release-please-end -->
 ```
 
 ## Configuration
@@ -88,3 +90,14 @@ description = "remove worktree"
 - `Open pull or merge request` for GitHub `pr:123`, GitLab `mr:123`, or a request URL
 - `esc` - Cancel; while entering a new worktree, return to the picker
 - `prefix+shift+x` - Confirm removal of the focused non-primary worktree
+
+## Releasing
+
+Release Please maintains a release PR from conventional commits on `main`:
+
+- `fix:` creates a patch release.
+- `feat:` creates a minor release.
+- A `!` after the type/scope or a `BREAKING CHANGE:` footer creates a major release.
+- Other commit types do not create a release.
+
+Merging the release PR updates the Cargo, plugin, and README versions, creates the tag, and publishes the GitHub release.
