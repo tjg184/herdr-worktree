@@ -198,41 +198,34 @@ pub fn run_tui(repo_root: String, config: Config, entries: Vec<BranchEntry>, sho
             }
 
             // Global keys
-            match key.code {
-                KeyCode::Esc => {
-                    match &app.state {
-                        AppState::Picking => {
-                            disable_raw_mode()?;
-                            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                            terminal.show_cursor()?;
-                            return Ok(TuiResult::Cancelled);
-                        }
-                        AppState::CreatingNew { .. } => {
-                            app.cancel_creating_new();
-                            continue;
-                        }
-                    }
-                }
-                KeyCode::Char('r') if key.modifiers.contains(event::KeyModifiers::ALT) => {
-                    if matches!(app.state, AppState::Picking) {
+            if app.config.keybindings.cancel.matches(key) {
+                match &app.state {
+                    AppState::Picking => {
                         disable_raw_mode()?;
                         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
                         terminal.show_cursor()?;
-                        return Ok(TuiResult::ToggleRemotes);
+                        return Ok(TuiResult::Cancelled);
+                    }
+                    AppState::CreatingNew { .. } => {
+                        app.cancel_creating_new();
+                        continue;
                     }
                 }
-                _ => {}
+            }
+            if app.config.keybindings.toggle_remotes.matches(key)
+                && matches!(app.state, AppState::Picking)
+            {
+                disable_raw_mode()?;
+                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                terminal.show_cursor()?;
+                return Ok(TuiResult::ToggleRemotes);
             }
 
             // State-specific keys
             match &app.state {
                 AppState::Picking => {
                     match key.code {
-                        KeyCode::Char(c) => app.handle_input(c),
-                        KeyCode::Backspace => app.backspace(),
-                        KeyCode::Up => app.move_up(),
-                        KeyCode::Down => app.move_down(),
-                        KeyCode::Enter => {
+                        _ if app.config.keybindings.confirm.matches(key) => {
                             let selected = app.list_state.selected().unwrap_or(0);
                             if selected == 0 {
                                 // Pinned "+ New worktree..." entry
@@ -247,14 +240,16 @@ pub fn run_tui(repo_root: String, config: Config, entries: Vec<BranchEntry>, sho
                                 }
                             }
                         }
+                        KeyCode::Char(c) => app.handle_input(c),
+                        KeyCode::Backspace => app.backspace(),
+                        KeyCode::Up => app.move_up(),
+                        KeyCode::Down => app.move_down(),
                         _ => {}
                     }
                 }
                 AppState::CreatingNew { input } => {
                     match key.code {
-                        KeyCode::Char(c) => app.handle_input(c),
-                        KeyCode::Backspace => app.backspace(),
-                        KeyCode::Enter => {
+                        _ if app.config.keybindings.confirm.matches(key) => {
                             if !input.is_empty() {
                                 let entry = BranchEntry {
                                     kind: EntryKind::NewWorktree,
@@ -268,6 +263,8 @@ pub fn run_tui(repo_root: String, config: Config, entries: Vec<BranchEntry>, sho
                                 return Ok(TuiResult::Selected(entry));
                             }
                         }
+                        KeyCode::Char(c) => app.handle_input(c),
+                        KeyCode::Backspace => app.backspace(),
                         _ => {}
                     }
                 }
@@ -286,9 +283,17 @@ fn draw(f: &mut Frame, app: &mut App) {
     let (title, text) = match &app.state {
         AppState::Picking => {
             let title = if app.show_remotes {
-                "Filter (alt+r to hide remotes, Esc to cancel)"
+                format!(
+                    "Filter ({} to hide remotes, {} to cancel)",
+                    app.config.keybindings.toggle_remotes.display(),
+                    app.config.keybindings.cancel.display()
+                )
             } else {
-                "Filter (alt+r to show remotes, Esc to cancel)"
+                format!(
+                    "Filter ({} to show remotes, {} to cancel)",
+                    app.config.keybindings.toggle_remotes.display(),
+                    app.config.keybindings.cancel.display()
+                )
             };
             let text = format!(
                 "{}{}",
@@ -298,7 +303,10 @@ fn draw(f: &mut Frame, app: &mut App) {
             (title, text)
         }
         AppState::CreatingNew { input } => {
-            let title = "Branch, pr:N, or URL — Esc to go back";
+            let title = format!(
+                "Branch, pr:N, or URL - {} to go back",
+                app.config.keybindings.cancel.display()
+            );
             (title, input.clone())
         }
     };
@@ -340,7 +348,10 @@ fn draw(f: &mut Frame, app: &mut App) {
         }
         AppState::CreatingNew { .. } => {
             vec![ListItem::new(Line::from(vec![
-                Span::styled("↵ to create worktree", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} to create worktree", app.config.keybindings.confirm.display()),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]))]
         }
     };
