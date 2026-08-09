@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_true")]
     pub normalize_jira_prefix: bool,
@@ -10,7 +10,7 @@ pub struct Config {
     pub keybindings: Keybindings,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Keybindings {
     #[serde(default = "default_confirm")]
     pub confirm: String,
@@ -34,6 +34,25 @@ fn default_cancel() -> String {
 
 fn default_toggle_remotes() -> String {
     "alt+r".to_string()
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            normalize_jira_prefix: default_true(),
+            keybindings: Keybindings::default(),
+        }
+    }
+}
+
+impl Default for Keybindings {
+    fn default() -> Self {
+        Self {
+            confirm: default_confirm(),
+            cancel: default_cancel(),
+            toggle_remotes: default_toggle_remotes(),
+        }
+    }
 }
 
 impl Config {

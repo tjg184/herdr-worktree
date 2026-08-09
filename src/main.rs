@@ -246,15 +246,16 @@ fn open_picker_action() {
 }
 
 fn load_entries(repo_root: &str, include_remotes: bool) -> Result<Vec<BranchEntry>, String> {
-    let mut entries = wt_list(repo_root, true, false).map(|json| wt::parse_wt_list(&json))?;
+    load_entries_with(include_remotes, |include_branches, include_remotes| {
+        wt_list(repo_root, include_branches, include_remotes)
+    })
+}
 
-    if include_remotes {
-        let remote_entries =
-            wt_list(repo_root, false, true).map(|json| wt::parse_wt_list(&json))?;
-        entries.extend(remote_entries);
-    }
-
-    Ok(entries)
+fn load_entries_with(
+    include_remotes: bool,
+    mut list: impl FnMut(bool, bool) -> Result<Value, String>,
+) -> Result<Vec<BranchEntry>, String> {
+    list(true, include_remotes).map(|json| wt::parse_wt_list(&json))
 }
 
 fn run_ui() {
@@ -463,4 +464,40 @@ fn confirm_remove_ui() {
     }
 
     process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn loading_remotes_uses_one_combined_list_without_duplicate_worktrees() {
+        let mut calls = Vec::new();
+        let entries = load_entries_with(true, |include_branches, include_remotes| {
+            calls.push((include_branches, include_remotes));
+            Ok(json!({
+                "items": [
+                    {
+                        "branch": "main",
+                        "worktree": {"path": ".", "current": true, "main": true}
+                    },
+                    {"branch": "feature", "remote": "origin"}
+                ]
+            }))
+        })
+        .unwrap();
+
+        assert_eq!(calls, vec![(true, true)]);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.kind == EntryKind::WorktreeCurrent)
+                .count(),
+            1
+        );
+        assert!(entries
+            .iter()
+            .any(|entry| entry.kind == EntryKind::BranchRemote));
+    }
 }
