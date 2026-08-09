@@ -12,6 +12,16 @@ Interactive worktree picker for Herdr terminal workspace manager.
 
 ## Installation
 
+### Prerequisite
+
+This plugin requires [Worktrunk](https://worktrunk.dev/). Install it before using the picker or worktree removal action:
+
+```bash
+brew install worktrunk
+# or
+cargo install worktrunk
+```
+
 ```bash
 # Link local plugin
 git clone <repo-url> ~/dev/herdr-worktree

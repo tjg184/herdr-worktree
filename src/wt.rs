@@ -2,6 +2,36 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+const INSTALL_INSTRUCTIONS: &str =
+    "Install Worktrunk with: brew install worktrunk (or cargo install worktrunk)";
+
+pub fn ensure_available() -> Result<(), String> {
+    let mut command = Command::new("wt");
+    command.arg("--version");
+    ensure_available_with(&mut command)
+}
+
+fn ensure_available_with(command: &mut Command) -> Result<(), String> {
+    let output = command.output().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!("Worktrunk (wt) is required but was not found. {INSTALL_INSTRUCTIONS}")
+        } else {
+            format!("Could not run Worktrunk (wt): {error}")
+        }
+    })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        Err(format!("Worktrunk (wt) exited with {}. {INSTALL_INSTRUCTIONS}", output.status))
+    } else {
+        Err(format!("Worktrunk (wt) could not run: {stderr}"))
+    }
+}
+
 pub fn wt_switch(
     repo_root: &str,
     branch: &str,
@@ -162,5 +192,29 @@ mod tests {
             symbols: "".to_string(),
         };
         assert!(matches!(entry.kind, EntryKind::WorktreeCurrent | EntryKind::WorktreeMain | EntryKind::WorktreeOther));
+    }
+
+    #[test]
+    fn availability_check_accepts_a_successful_command() {
+        let mut command = Command::new("true");
+        assert!(ensure_available_with(&mut command).is_ok());
+    }
+
+    #[test]
+    fn availability_check_explains_how_to_install_a_missing_command() {
+        let mut command = Command::new("herdr-worktree-test-command-that-does-not-exist");
+        let error = ensure_available_with(&mut command).unwrap_err();
+
+        assert!(error.contains("Worktrunk (wt) is required but was not found"));
+        assert!(error.contains("brew install worktrunk"));
+    }
+
+    #[test]
+    fn availability_check_rejects_an_unsuccessful_command() {
+        let mut command = Command::new("false");
+        let error = ensure_available_with(&mut command).unwrap_err();
+
+        assert!(error.contains("Worktrunk (wt) exited"));
+        assert!(error.contains("cargo install worktrunk"));
     }
 }

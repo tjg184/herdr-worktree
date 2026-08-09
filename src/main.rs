@@ -11,7 +11,7 @@ mod wt;
 use config::Config;
 use git::{resolve_repo_root, get_primary_worktree};
 use herdr::{get_own_pane_id_from_env, close_plugin_pane, get_plugin_pane_id, herdr_json, focus_plugin_pane, worktree_open, workspace_close, show_notification, get_focused_workspace_id, open_confirm_remove_pane};
-use wt::{wt_list, wt_switch, wt_remove, BranchEntry, EntryKind};
+use wt::{ensure_available as ensure_worktrunk_available, wt_list, wt_switch, wt_remove, BranchEntry, EntryKind};
 use git::normalize_branch_name;
 use tui::TuiResult;
 use serde_json::Value;
@@ -52,6 +52,13 @@ fn show_error_and_exit(message: &str, code: i32) -> ! {
     process::exit(code);
 }
 
+fn ensure_worktrunk_or_exit() {
+    if let Err(error) = ensure_worktrunk_available() {
+        let _ = show_notification("Worktrunk unavailable", &error);
+        show_error_and_exit(&error, 1);
+    }
+}
+
 fn remove_action() {
     // Get herdr snapshot to find focused workspace
     let snapshot = match herdr_json(["api", "snapshot"]) {
@@ -61,6 +68,8 @@ fn remove_action() {
             show_error_and_exit(&format!("Failed to get herdr snapshot: {}", e), 1);
         }
     };
+
+    ensure_worktrunk_or_exit();
 
     // Get focused workspace ID from snapshot
     let workspace_id = match get_focused_workspace_id(&snapshot) {
@@ -72,9 +81,10 @@ fn remove_action() {
 
     // Get CWD and worktree info for the focused workspace
     let (checkout_path, repo_name, branch) = match get_workspace_info_from_snapshot(&snapshot, &workspace_id) {
-        Some(info) => info,
-        None => {
-            show_error_and_exit("Failed to get workspace worktree info", 1);
+        Ok(info) => info,
+        Err(error) => {
+            let _ = show_notification("Failed to get workspace worktree info", &error);
+            show_error_and_exit(&format!("Failed to get workspace worktree info: {error}"), 1);
         }
     };
 
@@ -139,28 +149,32 @@ fn remove_action() {
     process::exit(0);
 }
 
-fn get_workspace_info_from_snapshot(snapshot: &Value, workspace_id: &str) -> Option<(String, String, String)> {
+fn get_workspace_info_from_snapshot(snapshot: &Value, workspace_id: &str) -> Result<(String, String, String), String> {
     // Get worktree info: (checkout_path, repo_name, branch)
-    let workspaces = snapshot.pointer("/result/snapshot/workspaces")?.as_array()?;
+    let workspaces = snapshot.pointer("/result/snapshot/workspaces")
+        .and_then(|value| value.as_array())
+        .ok_or("Herdr snapshot has no workspaces")?;
     let workspace = workspaces.iter().find(|w| {
         w.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace_id)
-    })?;
+    }).ok_or("Focused workspace was not found")?;
     
-    let worktree = workspace.get("worktree")?;
-    let checkout_path = worktree.get("checkout_path")?.as_str()?.to_string();
-    let repo_name = worktree.get("repo_name")?.as_str()?.to_string();
+    let worktree = workspace.get("worktree").ok_or("Focused workspace has no worktree")?;
+    let checkout_path = worktree.get("checkout_path").and_then(|value| value.as_str())
+        .ok_or("Focused workspace has no checkout path")?.to_string();
+    let repo_name = worktree.get("repo_name").and_then(|value| value.as_str())
+        .ok_or("Focused workspace has no repository name")?.to_string();
     
     // Get branch from worktree list
-    let repo_root = worktree.get("repo_root")?.as_str()?;
-    let entries = wt_list(repo_root, true, false)
-        .ok()
-        .map(|json| wt::parse_wt_list(&json))?;
+    let repo_root = worktree.get("repo_root").and_then(|value| value.as_str())
+        .ok_or("Focused workspace has no repository root")?;
+    let entries = wt_list(repo_root, true, false).map(|json| wt::parse_wt_list(&json))?;
     
     let branch = entries.iter()
         .find(|e| e.path.as_deref() == Some(&checkout_path))
-        .map(|e| e.branch.clone())?;
+        .map(|e| e.branch.clone())
+        .ok_or("Could not determine the worktree branch")?;
     
-    Some((checkout_path, repo_name, branch))
+    Ok((checkout_path, repo_name, branch))
 }
 
 
@@ -174,6 +188,8 @@ fn open_picker_action() {
             process::exit(1);
         }
     };
+
+    ensure_worktrunk_or_exit();
 
     // Get workspace CWD from pane list (find shell pane in focused workspace)
     let current_cwd = herdr::get_workspace_cwd(&pane_json)
@@ -214,6 +230,8 @@ fn load_entries(repo_root: &str, include_remotes: bool) -> Result<Vec<BranchEntr
 
 fn run_ui() {
     let config = Config::load();
+
+    ensure_worktrunk_or_exit();
 
     // Resolve repo root from HERDR_WORKTREE_CWD (set by open action) or fallbacks
     let start_dir = env::var("HERDR_WORKTREE_CWD")
@@ -362,6 +380,8 @@ fn run_ui() {
 }
 
 fn confirm_remove_ui() {
+    ensure_worktrunk_or_exit();
+
     // Read env vars passed from remove_action
     let workspace_id = env::var("HERDR_REMOVE_WORKSPACE_ID")
         .expect("HERDR_REMOVE_WORKSPACE_ID not set");
