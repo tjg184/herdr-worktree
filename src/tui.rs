@@ -190,6 +190,15 @@ impl App {
         }
     }
 
+    fn new_intent_available(&self, selected: usize) -> bool {
+        new_intent_available(self.head, selected)
+    }
+
+    fn show_new_intent(&mut self, selected: usize) {
+        self.state = AppState::NewIntent { selected };
+        self.list_state.select(Some(selected));
+    }
+
     fn move_selection(&mut self, delta: isize) {
         let count = self.visible_count();
         if count == 0 {
@@ -325,6 +334,15 @@ impl App {
     }
 }
 
+fn new_intent_available(head: HeadState, selected: usize) -> bool {
+    match selected {
+        0 => head == HeadState::Branch,
+        1 => head != HeadState::Unborn,
+        2 => true,
+        _ => false,
+    }
+}
+
 fn is_reference(input: &str) -> bool {
     input.starts_with("pr:")
         || input.starts_with("mr:")
@@ -403,7 +421,7 @@ pub fn run_tui(
                 AppState::SelectingBase => {
                     app.filter = app.saved_filter.clone();
                     app.apply_filter();
-                    app.state = AppState::NewIntent { selected: 1 };
+                    app.show_new_intent(1);
                 }
                 AppState::Naming {
                     ref input,
@@ -411,15 +429,13 @@ pub fn run_tui(
                     intent,
                 } => {
                     let _ = (input, base);
-                    app.state = AppState::NewIntent {
-                        selected: if intent == NamingIntent::OpenReference {
-                            2
-                        } else if base.is_some() {
-                            1
-                        } else {
-                            0
-                        },
-                    };
+                    app.show_new_intent(if intent == NamingIntent::OpenReference {
+                        2
+                    } else if base.is_some() {
+                        1
+                    } else {
+                        0
+                    });
                 }
                 AppState::RemoteConflict { .. } => app.state = AppState::Picking,
                 AppState::Creating => unreachable!(),
@@ -441,8 +457,7 @@ pub fn run_tui(
             AppState::Picking => match key.code {
                 _ if app.config.keybindings.confirm.matches(key) => {
                     if app.list_state.selected() == Some(0) {
-                        app.state = AppState::NewIntent { selected: 0 };
-                        app.list_state.select(Some(0));
+                        app.show_new_intent(0);
                     } else if let Some(entry) = app.selected_entry() {
                         app.start_open(entry);
                     }
@@ -470,22 +485,23 @@ pub fn run_tui(
             AppState::NewIntent { mut selected } => match key.code {
                 KeyCode::Up => {
                     selected = selected.saturating_sub(1);
-                    app.state = AppState::NewIntent { selected };
-                    app.list_state.select(Some(selected));
+                    app.show_new_intent(selected);
                 }
                 KeyCode::Down => {
                     selected = (selected + 1).min(2);
-                    app.state = AppState::NewIntent { selected };
-                    app.list_state.select(Some(selected));
+                    app.show_new_intent(selected);
                 }
                 _ if app.config.keybindings.confirm.matches(key) => {
-                    if selected == 0 && app.head == HeadState::Branch {
+                    if !app.new_intent_available(selected) {
+                        continue;
+                    }
+                    if selected == 0 {
                         app.state = AppState::Naming {
                             input: String::new(),
                             base: None,
                             intent: NamingIntent::NewBranch,
                         };
-                    } else if selected == 1 && app.head != HeadState::Unborn {
+                    } else if selected == 1 {
                         app.saved_filter = app.filter.clone();
                         app.filter.clear();
                         app.apply_filter();
@@ -496,12 +512,6 @@ pub fn run_tui(
                             base: None,
                             intent: NamingIntent::OpenReference,
                         };
-                    } else {
-                        app.error = Some(if app.head == HeadState::Unborn {
-                            "Create an initial commit before creating a worktree".into()
-                        } else {
-                            "Detached HEAD cannot be used as a base".into()
-                        });
                     }
                 }
                 _ => {}
@@ -638,7 +648,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             ),
             app.filter.clone(),
         ),
-        AppState::NewIntent { .. } => ("New worktree".into(), "Choose what to open".into()),
+        AppState::NewIntent { .. } => ("Create worktree".into(), "Choose a starting point".into()),
         AppState::SelectingBase => ("Select base branch".into(), app.filter.clone()),
         AppState::Naming {
             input,
@@ -665,10 +675,23 @@ fn draw(frame: &mut Frame, app: &mut App) {
         ),
         AppState::Creating => ("Creating".into(), app.status.clone().unwrap_or_default()),
     };
-    frame.render_widget(
-        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(title)),
-        chunks[0],
-    );
+    if matches!(app.state, AppState::NewIntent { .. }) {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    title,
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Line::styled(text, Style::default().fg(TEXT)),
+            ]),
+            chunks[0],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(title)),
+            chunks[0],
+        );
+    }
     let items = match &app.state {
         AppState::Picking => {
             let mut rows = vec![ListItem::new(Span::styled(
@@ -689,11 +712,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
             .filter_map(|index| app.entries.get(*index))
             .map(render_entry)
             .collect(),
-        AppState::NewIntent { .. } => vec![
-            ListItem::new("New branch from current HEAD"),
-            ListItem::new("New branch from another base"),
-            ListItem::new("Open pull or merge request"),
-        ],
+        AppState::NewIntent { .. } => (0..3)
+            .map(|selected| render_new_intent(selected, app.head))
+            .collect(),
         AppState::Naming { intent, .. } => vec![ListItem::new(match intent {
             NamingIntent::NewBranch => "Enter a new branch name",
             NamingIntent::OpenReference => {
@@ -706,15 +727,25 @@ fn draw(frame: &mut Frame, app: &mut App) {
         ],
         AppState::Creating => vec![ListItem::new("Working...")],
     };
+    let list_title = if matches!(app.state, AppState::NewIntent { .. }) {
+        "Starting point"
+    } else {
+        "Worktrees and branches"
+    };
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Worktrees and branches"),
-        )
-        .highlight_style(Style::default().bg(SURFACE).add_modifier(Modifier::BOLD));
+        .block(Block::default().borders(Borders::ALL).title(list_title))
+        .highlight_style(Style::default().bg(SURFACE).add_modifier(Modifier::BOLD))
+        .highlight_symbol("> ");
     frame.render_stateful_widget(list, chunks[1], &mut app.list_state);
-    let message = app.error.as_deref().or(app.status.as_deref()).unwrap_or("");
+    let controls = match app.state {
+        AppState::NewIntent { .. } => "↑/↓ select   ↵ continue   Esc back",
+        _ => "",
+    };
+    let message = app
+        .error
+        .as_deref()
+        .or(app.status.as_deref())
+        .unwrap_or(controls);
     frame.render_widget(
         Paragraph::new(message).style(Style::default().fg(if app.error.is_some() {
             Color::Red
@@ -723,6 +754,53 @@ fn draw(frame: &mut Frame, app: &mut App) {
         })),
         chunks[2],
     );
+}
+
+fn render_new_intent(selected: usize, head: HeadState) -> ListItem<'static> {
+    let (label, description, color, unavailable) = match selected {
+        0 => (
+            "CURRENT HEAD",
+            "Create a new branch from your current checkout",
+            GREEN,
+            match head {
+                HeadState::Branch => None,
+                HeadState::Detached => Some("Unavailable: detached HEAD"),
+                HeadState::Unborn => Some("Unavailable: create an initial commit first"),
+            },
+        ),
+        1 => (
+            "ANOTHER BRANCH",
+            "Choose a local or remote base, then name the branch",
+            BLUE,
+            if head == HeadState::Unborn {
+                Some("Unavailable: create an initial commit first")
+            } else {
+                None
+            },
+        ),
+        2 => (
+            "PULL / MERGE REQUEST",
+            "Open pr:123, mr:123, or a request URL",
+            YELLOW,
+            None,
+        ),
+        _ => unreachable!(),
+    };
+    let description = unavailable.unwrap_or(description);
+    let label_style = if unavailable.is_some() {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    };
+    let description_style = if unavailable.is_some() {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(TEXT)
+    };
+    ListItem::new(vec![
+        Line::from(Span::styled(label, label_style)),
+        Line::from(Span::styled(description, description_style)),
+    ])
 }
 
 fn render_entry(entry: &BranchEntry) -> ListItem<'static> {
@@ -848,6 +926,34 @@ mod tests {
             remote_target(&remote, &[remote.clone(), local]).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn new_intent_availability_matches_head_state() {
+        assert!(new_intent_available(HeadState::Branch, 0));
+        assert!(new_intent_available(HeadState::Branch, 1));
+        assert!(!new_intent_available(HeadState::Detached, 0));
+        assert!(new_intent_available(HeadState::Detached, 1));
+        assert!(!new_intent_available(HeadState::Unborn, 0));
+        assert!(!new_intent_available(HeadState::Unborn, 1));
+        assert!(new_intent_available(HeadState::Unborn, 2));
+        assert!(!new_intent_available(HeadState::Branch, 3));
+    }
+
+    #[test]
+    fn restoring_new_intent_keeps_state_and_highlight_in_sync() {
+        let mut app = App::new(
+            Config::default(),
+            "/repo".into(),
+            Vec::new(),
+            false,
+            HeadState::Branch,
+        );
+
+        app.show_new_intent(1);
+
+        assert!(matches!(app.state, AppState::NewIntent { selected: 1 }));
+        assert_eq!(app.list_state.selected(), Some(1));
     }
     #[test]
     fn references_are_not_branch_names() {
