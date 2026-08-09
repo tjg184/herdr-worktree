@@ -258,6 +258,10 @@ fn load_entries_with(
     list(true, include_remotes).map(|json| wt::parse_wt_list(&json))
 }
 
+fn should_create_branch(kind: EntryKind, exists_locally: bool) -> bool {
+    kind != EntryKind::BranchRemote && !exists_locally
+}
+
 fn run_ui() {
     let config = Config::load();
 
@@ -329,13 +333,18 @@ fn run_ui() {
             }
             // For branches (local/remote), use wt switch to create/switch
             EntryKind::BranchLocal | EntryKind::BranchRemote => {
-                // Check if branch exists (to determine if we need --create)
-                let exists = load_entries(&repo_root, false)
+                // Worktrunk creates a local tracking branch for remote rows when
+                // invoked without --create.
+                let exists_locally = load_entries(&repo_root, false)
                     .map(|entries| entries.iter().any(|e| e.branch == normalized))
                     .unwrap_or(false);
 
                 // Run wt switch
-                match wt_switch(&repo_root, &normalized, !exists) {
+                match wt_switch(
+                    &repo_root,
+                    &normalized,
+                    should_create_branch(entry.kind, exists_locally),
+                ) {
                     Ok(result) => {
                         let path = result
                             .get("path")
@@ -499,5 +508,17 @@ mod tests {
         assert!(entries
             .iter()
             .any(|entry| entry.kind == EntryKind::BranchRemote));
+    }
+
+    #[test]
+    fn remote_branches_are_not_explicitly_created() {
+        assert!(!should_create_branch(EntryKind::BranchRemote, false));
+        assert!(!should_create_branch(EntryKind::BranchRemote, true));
+    }
+
+    #[test]
+    fn missing_local_branches_are_explicitly_created() {
+        assert!(should_create_branch(EntryKind::BranchLocal, false));
+        assert!(!should_create_branch(EntryKind::BranchLocal, true));
     }
 }
