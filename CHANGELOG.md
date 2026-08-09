@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/tjg184/herdr-worktree/compare/v1.0.0...v1.1.0) (2026-08-09)
+
+
+### Features
+
+* **backend:** add native herdr worktree backend ([b9748c1](https://github.com/tjg184/herdr-worktree/commit/b9748c1a4f4393f080eaef368cf873287c1c00bc))
+
 ## [1.0.0](https://github.com/tjg184/herdr-worktree/compare/v0.1.0...v1.0.0) (2026-08-09)
 
 
