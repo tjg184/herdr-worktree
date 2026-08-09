@@ -130,6 +130,51 @@ pub fn worktree_open(repo_root: &str, path: &str, focus: bool) -> Result<Value, 
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
 }
 
+pub fn worktree_create(repo_root: &str, branch: &str, base: Option<&str>) -> Result<Value, String> {
+    let mut args = vec![
+        "worktree", "create", "--cwd", repo_root, "--branch", branch, "--focus", "--json",
+    ];
+    if let Some(base) = base {
+        args.extend(["--base", base]);
+    }
+    let out = Command::new(herdr_bin())
+        .args(&args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !out.status.success() {
+        return Err(command_error(&out));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|error| error.to_string())
+}
+
+pub fn worktree_remove(workspace_id: &str) -> Result<(), String> {
+    let out = Command::new(herdr_bin())
+        .args(["worktree", "remove", "--workspace", workspace_id])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(command_error(&out))
+    }
+}
+
+fn command_error(out: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for text in [&stderr, &stdout] {
+        if let Ok(value) = serde_json::from_str::<Value>(text) {
+            if let Some(message) = value.pointer("/error/message").and_then(Value::as_str) {
+                return message.to_string();
+            }
+        }
+        if !text.trim().is_empty() {
+            return text.trim().to_string();
+        }
+    }
+    format!("herdr exited with {}", out.status)
+}
+
 // Get own pane ID from HERDR_PLUGIN_CONTEXT_JSON env var
 pub fn get_own_pane_id_from_env() -> Option<String> {
     env::var("HERDR_PLUGIN_CONTEXT_JSON")

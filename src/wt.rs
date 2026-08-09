@@ -54,6 +54,22 @@ pub fn wt_switch(repo_root: &str, branch: &str, create: bool) -> Result<Value, S
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
 }
 
+pub fn wt_switch_with_base(repo_root: &str, branch: &str, base: &str) -> Result<Value, String> {
+    let out = Command::new("wt")
+        .args([
+            "switch", "--no-cd", "--format", "json", "-C", repo_root, "--create", "--base", base,
+            branch,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    serde_json::from_slice(&out.stdout).map_err(|error| error.to_string())
+}
+
 pub fn wt_remove(repo_root: &str, checkout_path: &str) -> Result<Value, String> {
     let out = Command::new("wt")
         .args([

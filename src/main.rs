@@ -8,7 +8,7 @@ mod model;
 mod tui;
 mod wt;
 
-use config::Config;
+use config::{Config, WorktreeBackend};
 use crossterm::{
     event::{self},
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -17,6 +17,7 @@ use git::{get_primary_worktree, head_state, resolve_repo_root};
 use herdr::{
     close_plugin_pane, focus_plugin_pane, get_focused_workspace_id, get_own_pane_id_from_env,
     get_plugin_pane_id, herdr_json, open_confirm_remove_pane, show_notification, workspace_close,
+    worktree_remove,
 };
 use serde_json::Value;
 use tui::TuiResult;
@@ -65,6 +66,7 @@ fn ensure_worktrunk_or_exit() {
 }
 
 fn remove_action() {
+    let config = Config::load();
     // Get herdr snapshot to find focused workspace
     let snapshot = match herdr_json(["api", "snapshot"]) {
         Ok(json) => json,
@@ -74,7 +76,9 @@ fn remove_action() {
         }
     };
 
-    ensure_worktrunk_or_exit();
+    if config.backend == WorktreeBackend::Worktrunk {
+        ensure_worktrunk_or_exit();
+    }
 
     // Get focused workspace ID from snapshot
     let workspace_id = match get_focused_workspace_id(&snapshot) {
@@ -86,7 +90,7 @@ fn remove_action() {
 
     // Get CWD and worktree info for the focused workspace
     let (checkout_path, repo_name, branch) =
-        match get_workspace_info_from_snapshot(&snapshot, &workspace_id) {
+        match get_workspace_info_from_snapshot(&snapshot, &workspace_id, config.backend) {
             Ok(info) => info,
             Err(error) => {
                 let _ = show_notification("Failed to get workspace worktree info", &error);
@@ -120,9 +124,12 @@ fn remove_action() {
 
     // Build display string: repo_name: branch
     let display_text = format!("{}: {}", repo_name, branch);
-    let removal_safety = wt_list(&repo_root, false, false)
-        .map(|list| removal_safety(&list, &checkout_path))
-        .unwrap_or(RemovalSafety::Unknown);
+    let removal_safety = match config.backend {
+        WorktreeBackend::Worktrunk => wt_list(&repo_root, false, false)
+            .map(|list| removal_safety(&list, &checkout_path))
+            .unwrap_or(RemovalSafety::Unknown),
+        WorktreeBackend::Native => git::native_removal_safety(&checkout_path),
+    };
 
     // Check if confirm dialog is already open using global lock file with PID check
     let lock_file = "/tmp/herdr-worktree-confirm.lock";
@@ -152,6 +159,13 @@ fn remove_action() {
         ("HERDR_REMOVE_BRANCH", branch.as_str()),
         ("HERDR_REMOVE_DISPLAY_TEXT", display_text.as_str()),
         ("HERDR_REMOVE_SAFETY", removal_safety.as_env_value()),
+        (
+            "HERDR_REMOVE_BACKEND",
+            match config.backend {
+                WorktreeBackend::Worktrunk => "worktrunk",
+                WorktreeBackend::Native => "native",
+            },
+        ),
     ];
     if let Err(e) = open_confirm_remove_pane(&plugin_id, &env_vars) {
         // Clean up lock file on error
@@ -165,6 +179,7 @@ fn remove_action() {
 fn get_workspace_info_from_snapshot(
     snapshot: &Value,
     workspace_id: &str,
+    backend: WorktreeBackend,
 ) -> Result<(String, String, String), String> {
     // Get worktree info: (checkout_path, repo_name, branch)
     let workspaces = snapshot
@@ -195,7 +210,12 @@ fn get_workspace_info_from_snapshot(
         .get("repo_root")
         .and_then(|value| value.as_str())
         .ok_or("Focused workspace has no repository root")?;
-    let entries = wt_list(repo_root, true, false).map(|json| wt::parse_wt_list(&json))?;
+    let entries = match backend {
+        WorktreeBackend::Worktrunk => {
+            wt_list(repo_root, true, false).map(|json| wt::parse_wt_list(&json))?
+        }
+        WorktreeBackend::Native => git::native_entries(repo_root, false)?,
+    };
 
     let branch = entries
         .iter()
@@ -207,6 +227,7 @@ fn get_workspace_info_from_snapshot(
 }
 
 fn open_picker_action() {
+    let config = Config::load();
     // Check if picker already exists in focused workspace
     let pane_json = match herdr_json(["pane", "list"]) {
         Ok(json) => json,
@@ -216,7 +237,9 @@ fn open_picker_action() {
         }
     };
 
-    ensure_worktrunk_or_exit();
+    if config.backend == WorktreeBackend::Worktrunk {
+        ensure_worktrunk_or_exit();
+    }
 
     // Get workspace CWD from pane list (find shell pane in focused workspace)
     let current_cwd = herdr::get_workspace_cwd(&pane_json)
@@ -243,10 +266,19 @@ fn open_picker_action() {
     process::exit(0);
 }
 
-fn load_entries(repo_root: &str, include_remotes: bool) -> Result<Vec<BranchEntry>, String> {
-    load_entries_with(include_remotes, |include_branches, include_remotes| {
-        wt_list(repo_root, include_branches, include_remotes)
-    })
+fn load_entries(
+    repo_root: &str,
+    include_remotes: bool,
+    backend: WorktreeBackend,
+) -> Result<Vec<BranchEntry>, String> {
+    match backend {
+        WorktreeBackend::Worktrunk => {
+            load_entries_with(include_remotes, |include_branches, include_remotes| {
+                wt_list(repo_root, include_branches, include_remotes)
+            })
+        }
+        WorktreeBackend::Native => git::native_entries(repo_root, include_remotes),
+    }
 }
 
 fn load_entries_with(
@@ -259,7 +291,9 @@ fn load_entries_with(
 fn run_ui() {
     let config = Config::load();
 
-    ensure_worktrunk_or_exit();
+    if config.backend == WorktreeBackend::Worktrunk {
+        ensure_worktrunk_or_exit();
+    }
 
     // Resolve repo root from HERDR_WORKTREE_CWD (set by open action) or fallbacks
     let start_dir = env::var("HERDR_WORKTREE_CWD")
@@ -285,7 +319,7 @@ fn run_ui() {
     // Reload only when the visibility setting changes; refreshes are handled in the TUI.
     let mut show_remotes = false;
     loop {
-        let entries = match load_entries(&repo_root, show_remotes) {
+        let entries = match load_entries(&repo_root, show_remotes, config.backend) {
             Ok(e) => e,
             Err(e) => {
                 show_error_and_exit(&format!("Failed to list worktrees: {}", e), 1);
@@ -320,7 +354,13 @@ fn run_ui() {
 }
 
 fn confirm_remove_ui() {
-    ensure_worktrunk_or_exit();
+    let backend = match env::var("HERDR_REMOVE_BACKEND").as_deref() {
+        Ok("native") => WorktreeBackend::Native,
+        _ => WorktreeBackend::Worktrunk,
+    };
+    if backend == WorktreeBackend::Worktrunk {
+        ensure_worktrunk_or_exit();
+    }
 
     // Read env vars passed from remove_action
     let workspace_id =
@@ -343,21 +383,29 @@ fn confirm_remove_ui() {
     }
 
     // Run confirm dialog TUI inline
-    let confirmed = tui::run_confirm_tui(&display_text, &removal_safety).unwrap_or(false);
+    let confirmed = tui::run_confirm_tui(&display_text, &removal_safety, backend).unwrap_or(false);
 
     if confirmed {
         // Remove the worktree
-        match wt_remove(&repo_root, &checkout_path) {
-            Ok(remove_result) => {
-                // Extract branch for notification
-                let removed_branch = remove_result
+        let result = match backend {
+            WorktreeBackend::Worktrunk => wt_remove(&repo_root, &checkout_path).map(|value| {
+                value
                     .get("branch")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<unknown>");
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("<unknown>")
+                    .to_string()
+            }),
+            WorktreeBackend::Native => worktree_remove(&workspace_id)
+                .map(|_| env::var("HERDR_REMOVE_BRANCH").unwrap_or_else(|_| "<unknown>".into())),
+        };
+        match result {
+            Ok(removed_branch) => {
                 let notification_body = format!("{}: {}", repo_name, removed_branch);
 
                 // Close the workspace
-                let _ = workspace_close(&workspace_id);
+                if backend == WorktreeBackend::Worktrunk {
+                    let _ = workspace_close(&workspace_id);
+                }
 
                 // Show success notification
                 let _ = show_notification("Worktree removed", &notification_body);

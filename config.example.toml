@@ -5,6 +5,10 @@
 # the prefix uppercased automatically.
 normalize_jira_prefix = true
 
+# "worktrunk" preserves hooks, path templates, PR/MR support, and conditional
+# branch cleanup. "native" uses Herdr directly and keeps branches on removal.
+backend = "worktrunk"
+
 [keybindings]
 # Key to confirm selection and open worktree
 confirm = "enter"

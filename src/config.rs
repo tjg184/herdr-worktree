@@ -5,10 +5,25 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    #[serde(default)]
+    pub backend: WorktreeBackend,
     #[serde(default = "default_true")]
     pub normalize_jira_prefix: bool,
     #[serde(default)]
     pub keybindings: Keybindings,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WorktreeBackend {
+    Worktrunk,
+    Native,
+}
+
+impl Default for WorktreeBackend {
+    fn default() -> Self {
+        Self::Worktrunk
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -134,6 +149,7 @@ fn default_refresh() -> KeyBinding {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            backend: WorktreeBackend::default(),
             normalize_jira_prefix: default_true(),
             keybindings: Keybindings::default(),
         }
@@ -187,10 +203,17 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert!(config.normalize_jira_prefix);
+        assert_eq!(config.backend, WorktreeBackend::Worktrunk);
         assert_eq!(config.keybindings.confirm.display(), "enter");
         assert_eq!(config.keybindings.cancel.display(), "esc");
         assert_eq!(config.keybindings.toggle_remotes.display(), "alt+r");
         assert_eq!(config.keybindings.refresh.display(), "ctrl+r");
+    }
+
+    #[test]
+    fn native_backend_deserializes() {
+        let config: Config = toml::from_str("backend = \"native\"").unwrap();
+        assert_eq!(config.backend, WorktreeBackend::Native);
     }
 
     #[test]

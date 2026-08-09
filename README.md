@@ -6,7 +6,7 @@ Create, switch, and remove Git worktrees from Herdr.
 
 ### Prerequisite
 
-This plugin requires [Worktrunk](https://worktrunk.dev/). Install it before using the picker or worktree removal action:
+This plugin uses [Worktrunk](https://worktrunk.dev/) by default. It provides hooks, path templates, pull/merge request opening, and conditional branch cleanup. Install it for the default backend:
 
 ```bash
 brew install worktrunk
@@ -36,6 +36,8 @@ normalize_jira_prefix = true
 ```
 
 See [`config.example.toml`](config.example.toml) to customize picker keybindings.
+
+Set `backend = "native"` to use Herdr's built-in worktree commands instead. Native mode requires Herdr 0.8.0+, does not require Worktrunk, keeps branches when removing worktrees, and does not support pull/merge request references.
 
 ## Keybindings
 

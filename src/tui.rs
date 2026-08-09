@@ -20,7 +20,7 @@ use ratatui::{
 };
 
 use crate::{
-    config::Config,
+    config::{Config, WorktreeBackend},
     git::{self, HeadState},
     herdr,
     wt::{self, BranchEntry, EntryKind, RemovalSafety},
@@ -191,7 +191,7 @@ impl App {
     }
 
     fn new_intent_available(&self, selected: usize) -> bool {
-        new_intent_available(self.head, selected)
+        new_intent_available(self.head, self.config.backend, selected)
     }
 
     fn show_new_intent(&mut self, selected: usize) {
@@ -225,11 +225,15 @@ impl App {
         }
         let repo_root = self.repo_root.clone();
         let show_remotes = self.show_remotes;
+        let backend = self.config.backend;
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let result = git::fetch_all(&repo_root)
-                .and_then(|_| wt::wt_list(&repo_root, true, show_remotes))
-                .map(|json| wt::parse_wt_list(&json));
+            let result = git::fetch_all(&repo_root).and_then(|_| match backend {
+                WorktreeBackend::Worktrunk => {
+                    wt::wt_list(&repo_root, true, show_remotes).map(|json| wt::parse_wt_list(&json))
+                }
+                WorktreeBackend::Native => git::native_entries(&repo_root, show_remotes),
+            });
             let _ = sender.send(result);
         });
         self.fetch = Some(receiver);
@@ -238,6 +242,8 @@ impl App {
     }
 
     fn start_open(&mut self, entry: BranchEntry) {
+        let backend = self.config.backend;
+        let branch = entry.branch.clone();
         let target = match entry.kind {
             EntryKind::WorktreeCurrent | EntryKind::WorktreeMain | EntryKind::WorktreeOther => {
                 entry.path.clone().map(|path| (path, false))
@@ -264,16 +270,24 @@ impl App {
             return;
         };
         self.start_task(move |repo_root| {
-            let path = if switch {
-                wt::wt_switch(&repo_root, &target, false)?
-                    .get("path")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or(&target)
-                    .to_string()
-            } else {
-                target
-            };
-            herdr::worktree_open(&repo_root, &path, true).map(|_| ())
+            if !switch {
+                return herdr::worktree_open(&repo_root, &target, true).map(|_| ());
+            }
+            match backend {
+                WorktreeBackend::Worktrunk => {
+                    let result = wt::wt_switch(&repo_root, &target, false)?;
+                    let path = result
+                        .get("path")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(&target);
+                    herdr::worktree_open(&repo_root, path, true).map(|_| ())
+                }
+                WorktreeBackend::Native => {
+                    let base =
+                        matches!(entry.kind, EntryKind::BranchRemote).then_some(target.as_str());
+                    herdr::worktree_create(&repo_root, &branch, base).map(|_| ())
+                }
+            }
         });
     }
 
@@ -288,31 +302,53 @@ impl App {
                 self.error = Some(error);
                 return;
             }
+        } else if self.config.backend == WorktreeBackend::Native {
+            self.error = Some("Pull and merge requests require Worktrunk".into());
+            return;
         } else if let Err(error) = validate_reference(&input) {
             self.error = Some(error);
             return;
         }
+        let backend = self.config.backend;
         if let Some(base) = base {
             let base_ref = base.reference();
-            let track = matches!(base.kind, EntryKind::BranchRemote);
-            self.start_task(move |repo_root| {
-                git::create_branch_from(&repo_root, &input, &base_ref, track)?;
-                let result = wt::wt_switch(&repo_root, &input, false)?;
-                let path = result
-                    .get("path")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or(&input);
-                herdr::worktree_open(&repo_root, path, true).map(|_| ())
+            self.start_task(move |repo_root| match backend {
+                WorktreeBackend::Worktrunk => {
+                    let result = wt::wt_switch_with_base(&repo_root, &input, &base_ref)?;
+                    let path = result
+                        .get("path")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(&input);
+                    herdr::worktree_open(&repo_root, path, true).map(|_| ())
+                }
+                WorktreeBackend::Native => {
+                    herdr::worktree_create(&repo_root, &input, Some(&base_ref)).map(|_| ())
+                }
             });
         } else {
-            let create = intent == NamingIntent::NewBranch;
-            self.start_task(move |repo_root| {
-                let result = wt::wt_switch(&repo_root, &input, create)?;
-                let path = result
-                    .get("path")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or(&input);
-                herdr::worktree_open(&repo_root, path, true).map(|_| ())
+            self.start_task(move |repo_root| match backend {
+                WorktreeBackend::Worktrunk => {
+                    let result = if intent == NamingIntent::NewBranch {
+                        wt::wt_switch_with_base(
+                            &repo_root,
+                            &input,
+                            &git::resolve_head(&repo_root)?,
+                        )?
+                    } else {
+                        wt::wt_switch(&repo_root, &input, false)?
+                    };
+                    let path = result
+                        .get("path")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(&input);
+                    herdr::worktree_open(&repo_root, path, true).map(|_| ())
+                }
+                WorktreeBackend::Native => herdr::worktree_create(
+                    &repo_root,
+                    &input,
+                    Some(&git::resolve_head(&repo_root)?),
+                )
+                .map(|_| ()),
             });
         }
     }
@@ -334,11 +370,11 @@ impl App {
     }
 }
 
-fn new_intent_available(head: HeadState, selected: usize) -> bool {
+fn new_intent_available(head: HeadState, backend: WorktreeBackend, selected: usize) -> bool {
     match selected {
         0 => head == HeadState::Branch,
         1 => head != HeadState::Unborn,
-        2 => true,
+        2 => backend == WorktreeBackend::Worktrunk,
         _ => false,
     }
 }
@@ -397,8 +433,8 @@ pub fn run_tui(
     enable_raw_mode()?;
     let mut output = stdout();
     execute!(output, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(output);
-    let mut terminal = Terminal::new(backend)?;
+    let terminal_backend = CrosstermBackend::new(output);
+    let mut terminal = Terminal::new(terminal_backend)?;
     let mut app = App::new(config, repo_root, entries, show_remotes, head);
     let result = loop {
         terminal.draw(|frame| draw(frame, &mut app))?;
@@ -713,7 +749,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             .map(render_entry)
             .collect(),
         AppState::NewIntent { .. } => (0..3)
-            .map(|selected| render_new_intent(selected, app.head))
+            .map(|selected| render_new_intent(selected, app.head, app.config.backend))
             .collect(),
         AppState::Naming { intent, .. } => vec![ListItem::new(match intent {
             NamingIntent::NewBranch => "Enter a new branch name",
@@ -756,7 +792,11 @@ fn draw(frame: &mut Frame, app: &mut App) {
     );
 }
 
-fn render_new_intent(selected: usize, head: HeadState) -> ListItem<'static> {
+fn render_new_intent(
+    selected: usize,
+    head: HeadState,
+    backend: WorktreeBackend,
+) -> ListItem<'static> {
     let (label, description, color, unavailable) = match selected {
         0 => (
             "CURRENT HEAD",
@@ -782,7 +822,7 @@ fn render_new_intent(selected: usize, head: HeadState) -> ListItem<'static> {
             "PULL / MERGE REQUEST",
             "Open pr:123, mr:123, or a request URL",
             YELLOW,
-            None,
+            (backend == WorktreeBackend::Native).then_some("Requires Worktrunk"),
         ),
         _ => unreachable!(),
     };
@@ -812,14 +852,18 @@ fn render_entry(entry: &BranchEntry) -> ListItem<'static> {
     ]))
 }
 
-pub fn run_confirm_tui(statusline: &str, safety: &RemovalSafety) -> io::Result<bool> {
+pub fn run_confirm_tui(
+    statusline: &str,
+    safety: &RemovalSafety,
+    backend: WorktreeBackend,
+) -> io::Result<bool> {
     enable_raw_mode()?;
     let mut output = stdout();
     execute!(output, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(output);
-    let mut terminal = Terminal::new(backend)?;
+    let terminal_backend = CrosstermBackend::new(output);
+    let mut terminal = Terminal::new(terminal_backend)?;
     let result = loop {
-        terminal.draw(|frame| draw_confirm_ui(frame, statusline, safety))?;
+        terminal.draw(|frame| draw_confirm_ui(frame, statusline, safety, backend))?;
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 match key.code {
@@ -837,7 +881,12 @@ pub fn run_confirm_tui(statusline: &str, safety: &RemovalSafety) -> io::Result<b
     Ok(result)
 }
 
-fn draw_confirm_ui(frame: &mut Frame, statusline: &str, safety: &RemovalSafety) {
+fn draw_confirm_ui(
+    frame: &mut Frame,
+    statusline: &str,
+    safety: &RemovalSafety,
+    backend: WorktreeBackend,
+) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -855,10 +904,16 @@ fn draw_confirm_ui(frame: &mut Frame, statusline: &str, safety: &RemovalSafety) 
         layout[1],
     );
     let (message, color) = match safety {
-        RemovalSafety::Safe => (
-            "Safe to remove: worktree and branch will be deleted.",
-            Color::Green,
-        ),
+        RemovalSafety::Safe => match backend {
+            WorktreeBackend::Worktrunk => (
+                "Safe to remove: worktree and branch will be deleted.",
+                Color::Green,
+            ),
+            WorktreeBackend::Native => (
+                "Safe to remove: worktree will be removed; branch will be kept.",
+                Color::Green,
+            ),
+        },
         RemovalSafety::Dirty => (
             "Cannot remove: worktree has uncommitted changes.",
             Color::Red,
@@ -930,14 +985,46 @@ mod tests {
 
     #[test]
     fn new_intent_availability_matches_head_state() {
-        assert!(new_intent_available(HeadState::Branch, 0));
-        assert!(new_intent_available(HeadState::Branch, 1));
-        assert!(!new_intent_available(HeadState::Detached, 0));
-        assert!(new_intent_available(HeadState::Detached, 1));
-        assert!(!new_intent_available(HeadState::Unborn, 0));
-        assert!(!new_intent_available(HeadState::Unborn, 1));
-        assert!(new_intent_available(HeadState::Unborn, 2));
-        assert!(!new_intent_available(HeadState::Branch, 3));
+        assert!(new_intent_available(
+            HeadState::Branch,
+            WorktreeBackend::Worktrunk,
+            0
+        ));
+        assert!(new_intent_available(
+            HeadState::Branch,
+            WorktreeBackend::Worktrunk,
+            1
+        ));
+        assert!(!new_intent_available(
+            HeadState::Detached,
+            WorktreeBackend::Worktrunk,
+            0
+        ));
+        assert!(new_intent_available(
+            HeadState::Detached,
+            WorktreeBackend::Worktrunk,
+            1
+        ));
+        assert!(!new_intent_available(
+            HeadState::Unborn,
+            WorktreeBackend::Worktrunk,
+            0
+        ));
+        assert!(!new_intent_available(
+            HeadState::Unborn,
+            WorktreeBackend::Worktrunk,
+            1
+        ));
+        assert!(new_intent_available(
+            HeadState::Unborn,
+            WorktreeBackend::Worktrunk,
+            2
+        ));
+        assert!(!new_intent_available(
+            HeadState::Branch,
+            WorktreeBackend::Native,
+            2
+        ));
     }
 
     #[test]
