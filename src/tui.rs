@@ -88,7 +88,7 @@ impl App {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.branch.to_lowercase().contains(&filter_lower))
+            .filter(|(_, e)| e.reference().to_lowercase().contains(&filter_lower))
             .map(|(i, _)| i)
             .collect();
         
@@ -256,6 +256,8 @@ pub fn run_tui(repo_root: String, config: Config, entries: Vec<BranchEntry>, sho
                                     branch: input.clone(),
                                     path: None,
                                     symbols: String::new(),
+                                    remote: None,
+                                    upstream: None,
                                 };
                                 disable_raw_mode()?;
                                 execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -339,7 +341,7 @@ fn draw(f: &mut Frame, app: &mut App) {
                     ListItem::new(Line::from(vec![
                         Span::styled(indicator, style),
                         Span::raw(format!("  {}  ", entry.symbols)),
-                        Span::styled(&entry.branch, Style::default().fg(TOKYO_NIGHT_TEXT)),
+                        Span::styled(entry.reference(), Style::default().fg(TOKYO_NIGHT_TEXT)),
                     ]))
                 })
                 .collect();
@@ -507,30 +509,40 @@ mod tests {
                 branch: "current".into(),
                 path: None,
                 symbols: String::new(),
+                remote: None,
+                upstream: None,
             },
             BranchEntry {
                 kind: EntryKind::WorktreeMain,
                 branch: "main".into(),
                 path: None,
                 symbols: String::new(),
+                remote: None,
+                upstream: None,
             },
             BranchEntry {
                 kind: EntryKind::WorktreeOther,
                 branch: "tree".into(),
                 path: None,
                 symbols: String::new(),
+                remote: None,
+                upstream: None,
             },
             BranchEntry {
                 kind: EntryKind::BranchLocal,
                 branch: "local".into(),
                 path: None,
                 symbols: String::new(),
+                remote: None,
+                upstream: None,
             },
             BranchEntry {
                 kind: EntryKind::BranchRemote,
                 branch: "remote".into(),
                 path: None,
                 symbols: String::new(),
+                remote: Some("origin".into()),
+                upstream: None,
             },
         ];
         let backend = TestBackend::new(40, 12);

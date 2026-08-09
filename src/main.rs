@@ -258,8 +258,46 @@ fn load_entries_with(
     list(true, include_remotes).map(|json| wt::parse_wt_list(&json))
 }
 
-fn should_create_branch(kind: EntryKind, exists_locally: bool) -> bool {
-    kind != EntryKind::BranchRemote && !exists_locally
+fn remote_switch_target(entry: &BranchEntry, entries: &[BranchEntry]) -> Result<String, String> {
+    let remote = entry
+        .remote
+        .as_deref()
+        .ok_or_else(|| format!("Remote branch {} has no remote name", entry.branch))?;
+    let remote_reference = format!("{remote}/{}", entry.branch);
+    let local = entries.iter().find(|candidate| {
+        candidate.kind != EntryKind::BranchRemote && candidate.branch == entry.branch
+    });
+
+    match local {
+        None => Ok(remote_reference),
+        Some(local) if local.upstream.as_deref() == Some(remote_reference.as_str()) => {
+            Ok(local.branch.clone())
+        }
+        Some(local) => Err(format!(
+            "Cannot open {remote_reference}: local branch {} tracks {} instead",
+            entry.branch,
+            local.upstream.as_deref().unwrap_or("no remote")
+        )),
+    }
+}
+
+fn listed_branch_switch_target(
+    entry: &BranchEntry,
+    entries: &[BranchEntry],
+) -> Result<String, String> {
+    match entry.kind {
+        EntryKind::BranchLocal => Ok(entry.branch.clone()),
+        EntryKind::BranchRemote => remote_switch_target(entry, entries),
+        _ => Err(format!("{} is not a branch entry", entry.reference())),
+    }
+}
+
+fn should_create_new_worktree(input: &str, exists_locally: bool) -> bool {
+    let is_ref = input.starts_with("pr:")
+        || input.starts_with("mr:")
+        || input.starts_with("http://")
+        || input.starts_with("https://");
+    !is_ref && !exists_locally
 }
 
 fn run_ui() {
@@ -310,8 +348,6 @@ fn run_ui() {
 
     // PHASE 3: After final TUI teardown, perform side effects
     if let Some(entry) = selection {
-        let normalized = normalize_branch_name(&entry.branch, config.normalize_jira_prefix);
-
         // Handle based on entry kind
         match entry.kind {
             // For existing worktrees, just open them in herdr (skip wt switch)
@@ -333,23 +369,24 @@ fn run_ui() {
             }
             // For branches (local/remote), use wt switch to create/switch
             EntryKind::BranchLocal | EntryKind::BranchRemote => {
-                // Worktrunk creates a local tracking branch for remote rows when
-                // invoked without --create.
-                let exists_locally = load_entries(&repo_root, false)
-                    .map(|entries| entries.iter().any(|e| e.branch == normalized))
-                    .unwrap_or(false);
+                let target = match entry.kind {
+                    EntryKind::BranchLocal => listed_branch_switch_target(&entry, &[]),
+                    EntryKind::BranchRemote => load_entries(&repo_root, true)
+                        .and_then(|entries| listed_branch_switch_target(&entry, &entries)),
+                    _ => unreachable!(),
+                };
+                let target = match target {
+                    Ok(target) => target,
+                    Err(error) => show_error_and_exit(&error, 1),
+                };
 
                 // Run wt switch
-                match wt_switch(
-                    &repo_root,
-                    &normalized,
-                    should_create_branch(entry.kind, exists_locally),
-                ) {
+                match wt_switch(&repo_root, &target, false) {
                     Ok(result) => {
                         let path = result
                             .get("path")
                             .and_then(|v| v.as_str())
-                            .unwrap_or(&normalized);
+                            .unwrap_or(&target);
 
                         // Open worktree in herdr (with focus)
                         match worktree_open(&repo_root, path, true) {
@@ -370,27 +407,22 @@ fn run_ui() {
             }
             // For new worktree (from "+ New worktree..."), use wt switch with smart --create
             EntryKind::NewWorktree => {
-                let input = &normalized;
-                let is_ref = input.starts_with("pr:")
-                    || input.starts_with("mr:")
-                    || input.starts_with("http://")
-                    || input.starts_with("https://");
+                let input = normalize_branch_name(&entry.branch, config.normalize_jira_prefix);
 
                 // For pr:/mr:/URLs, don't use --create (wt handles them)
                 // For plain branch names, check if it exists locally
-                let create = if is_ref {
-                    false
-                } else {
-                    // Check if this branch name exists locally
-                    !load_entries(&repo_root, false)
-                        .map(|entries| entries.iter().any(|e| e.branch == *input))
-                        .unwrap_or(false)
-                };
+                let exists_locally = load_entries(&repo_root, false)
+                    .map(|entries| entries.iter().any(|entry| entry.branch == input))
+                    .unwrap_or(false);
+                let create = should_create_new_worktree(&input, exists_locally);
 
                 // Run wt switch (wt handles pr:N, URLs, existing branches, and new branches)
-                match wt_switch(&repo_root, input, create) {
+                match wt_switch(&repo_root, &input, create) {
                     Ok(result) => {
-                        let path = result.get("path").and_then(|v| v.as_str()).unwrap_or(input);
+                        let path = result
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&input);
 
                         // Open worktree in herdr (with focus)
                         match worktree_open(&repo_root, path, true) {
@@ -511,14 +543,85 @@ mod tests {
     }
 
     #[test]
-    fn remote_branches_are_not_explicitly_created() {
-        assert!(!should_create_branch(EntryKind::BranchRemote, false));
-        assert!(!should_create_branch(EntryKind::BranchRemote, true));
+    fn references_are_not_explicitly_created() {
+        assert!(!should_create_new_worktree("pr:42", false));
+        assert!(!should_create_new_worktree(
+            "https://github.com/org/repo/pull/42",
+            false
+        ));
     }
 
     #[test]
-    fn missing_local_branches_are_explicitly_created() {
-        assert!(should_create_branch(EntryKind::BranchLocal, false));
-        assert!(!should_create_branch(EntryKind::BranchLocal, true));
+    fn new_plain_branches_are_explicitly_created_only_when_missing() {
+        assert!(should_create_new_worktree("feature/new", false));
+        assert!(!should_create_new_worktree("feature/new", true));
+    }
+
+    #[test]
+    fn remote_selection_uses_exact_remote_or_blocks_a_collision() {
+        let remote = BranchEntry {
+            kind: EntryKind::BranchRemote,
+            branch: "feature/auth".into(),
+            path: None,
+            symbols: String::new(),
+            remote: Some("origin".into()),
+            upstream: None,
+        };
+        let conflicting_local = BranchEntry {
+            kind: EntryKind::BranchLocal,
+            branch: "feature/auth".into(),
+            path: None,
+            symbols: String::new(),
+            remote: None,
+            upstream: Some("upstream/feature/auth".into()),
+        };
+
+        assert_eq!(
+            remote_switch_target(&remote, std::slice::from_ref(&remote)),
+            Ok("origin/feature/auth".into())
+        );
+        assert!(remote_switch_target(&remote, &[remote.clone(), conflicting_local]).is_err());
+    }
+
+    #[test]
+    fn listed_local_branches_keep_their_exact_name() {
+        let local = BranchEntry {
+            kind: EntryKind::BranchLocal,
+            branch: "jira-123".into(),
+            path: None,
+            symbols: String::new(),
+            remote: None,
+            upstream: None,
+        };
+
+        assert_eq!(
+            listed_branch_switch_target(&local, &[]),
+            Ok("jira-123".into())
+        );
+    }
+
+    #[test]
+    fn remote_selection_opens_a_matching_local_branch() {
+        let remote = BranchEntry {
+            kind: EntryKind::BranchRemote,
+            branch: "feature/auth".into(),
+            path: None,
+            symbols: String::new(),
+            remote: Some("origin".into()),
+            upstream: None,
+        };
+        let local = BranchEntry {
+            kind: EntryKind::BranchLocal,
+            branch: "feature/auth".into(),
+            path: None,
+            symbols: String::new(),
+            remote: None,
+            upstream: Some("origin/feature/auth".into()),
+        };
+
+        assert_eq!(
+            remote_switch_target(&remote, &[remote.clone(), local]),
+            Ok("feature/auth".into())
+        );
     }
 }

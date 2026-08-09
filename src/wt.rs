@@ -194,12 +194,22 @@ pub fn removal_safety(list: &Value, checkout_path: &str) -> RemovalSafety {
 pub struct BranchEntry {
     pub kind: EntryKind,
     pub branch: String,
-    #[allow(dead_code)]
     pub path: Option<String>,
     pub symbols: String,
+    pub remote: Option<String>,
+    pub upstream: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl BranchEntry {
+    pub fn reference(&self) -> String {
+        match &self.remote {
+            Some(remote) => format!("{remote}/{}", self.branch),
+            None => self.branch.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EntryKind {
     WorktreeCurrent,
     WorktreeMain,
@@ -260,12 +270,26 @@ pub fn parse_wt_list(json: &Value) -> Vec<BranchEntry> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let remote = item
+            .get("remote")
+            .and_then(|value| value.as_str())
+            .map(String::from);
+        let upstream = item
+            .pointer("/upstream")
+            .and_then(|value| value.as_object())
+            .and_then(|upstream| {
+                let remote = upstream.get("remote")?.as_str()?;
+                let branch = upstream.get("branch")?.as_str()?;
+                Some(format!("{remote}/{branch}"))
+            });
 
         entries.push(BranchEntry {
             kind,
             branch: branch.to_string(),
             path,
             symbols,
+            remote,
+            upstream,
         });
     }
 
@@ -284,6 +308,8 @@ mod tests {
             branch: "test-branch".to_string(),
             path: Some("/some/path".to_string()),
             symbols: "".to_string(),
+            remote: None,
+            upstream: None,
         };
         assert!(matches!(
             entry.kind,
@@ -295,6 +321,27 @@ mod tests {
     fn availability_check_accepts_a_successful_command() {
         let mut command = Command::new("true");
         assert!(ensure_available_with(&mut command).is_ok());
+    }
+
+    #[test]
+    fn remote_entries_preserve_their_qualified_reference() {
+        let entries = parse_wt_list(&serde_json::json!({
+            "items": [{"branch": "feature/auth", "remote": "upstream"}]
+        }));
+
+        assert_eq!(entries[0].reference(), "upstream/feature/auth");
+    }
+
+    #[test]
+    fn local_entries_parse_their_upstream() {
+        let entries = parse_wt_list(&serde_json::json!({
+            "items": [{
+                "branch": "feature/auth",
+                "upstream": {"remote": "origin", "branch": "feature/auth"}
+            }]
+        }));
+
+        assert_eq!(entries[0].upstream.as_deref(), Some("origin/feature/auth"));
     }
 
     #[test]
