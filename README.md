@@ -1,16 +1,6 @@
 # Herdr Worktree Plugin
 
-Interactive worktree picker for Herdr terminal workspace manager.
-
-## Features
-
-- Browse existing worktrees, local branches, and remote branches
-- Create new worktrees from branches, pull requests, merge requests, or URLs
-- Jira-style branch name normalization (optional): `ticket-123` → `TICKET-123`
-- Toggle remote branches with `alt+r`
-- Refresh remote branches with `ctrl+r`
-- Create a branch from the current HEAD or a selected local/remote base
-- Auto-focus new worktree after creation
+Create, switch, and remove Git worktrees from Herdr.
 
 ## Installation
 
@@ -24,72 +14,47 @@ brew install worktrunk
 cargo install worktrunk
 ```
 
-```bash
-# Link local plugin
-git clone <repo-url> ~/dev/herdr-worktree
-cd ~/dev/herdr-worktree
-herdr plugin link $(pwd)
+Install from GitHub:
 
-# Or install a release from GitHub
-<!-- x-release-please-start-version -->
-herdr plugin install tjg184/herdr-worktree --ref v0.1.0
-<!-- x-release-please-end -->
+```bash
+herdr plugin install tjg184/herdr-worktree
+```
+
+For local development:
+
+```bash
+herdr plugin link /path/to/herdr-worktree
 ```
 
 ## Configuration
 
-Create `~/.config/herdr/plugins/config/herdr-worktree/config.toml`:
+The defaults work without configuration. To normalize Jira-style branch names,
+create `~/.config/herdr/plugins/config/herdr-worktree/config.toml`:
 
 ```toml
-# Normalize Jira-style branch names (ticket-123 → TICKET-123)
 normalize_jira_prefix = true
-
-[keybindings]
-confirm = "enter"
-cancel = "esc"
-toggle_remotes = "alt+r"
-refresh = "ctrl+r"
 ```
 
-Bindings accept `alt`, `ctrl`, and `shift` modifiers, such as `ctrl+o`. Supported named keys are `enter`, `esc`, `tab`, `backspace`, `up`, and `down`.
+See [`config.example.toml`](config.example.toml) to customize picker keybindings.
 
 ## Keybindings
 
 Add to `~/.config/herdr/config.toml`:
 
 ```toml
-# Remove default new_worktree binding (optional)
-new_worktree = ""
-
-# Wire plugin to prefix+shift+g
 [[keys.command]]
 key = "prefix+shift+g"
 type = "plugin_action"
 command = "herdr-worktree.open"
-description = "new worktree"
-
-# Remove the focused non-primary worktree
-[[keys.command]]
-key = "prefix+shift+x"
-type = "plugin_action"
-command = "herdr-worktree.remove"
-description = "remove worktree"
+description = "worktree picker"
 ```
 
 ## Usage
 
-- `prefix+shift+g` - Open the worktree picker
-- Type to filter branches
-- `alt+r` - Toggle remote branches
-- `ctrl+r` - Fetch all remotes and prune deleted refs
-- `ctrl+u` - Clear the active filter or branch-name input
-- `enter` - Select an existing worktree or branch
-- Select `New worktree...`, then choose one of:
-- `New branch from current HEAD` for a new branch name
-- `New branch from another base` to select a local or remote base, then enter a new branch name
-- `Open pull or merge request` for GitHub `pr:123`, GitLab `mr:123`, or a request URL
-- `esc` - Cancel; while entering a new worktree, return to the picker
-- `prefix+shift+x` - Confirm removal of the focused non-primary worktree
+- Run the bound command to open the picker.
+- Select an existing worktree to switch to it, or select `New worktree...`.
+- Create a branch from the current checkout or another branch, or open a GitHub pull request, GitLab merge request, or request URL.
+- Type to filter. The picker displays available controls and prompts at each step.
 
 ## Releasing
 
