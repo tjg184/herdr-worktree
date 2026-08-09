@@ -1,7 +1,7 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -19,6 +19,8 @@ pub struct Keybindings {
     pub cancel: KeyBinding,
     #[serde(default = "default_toggle_remotes")]
     pub toggle_remotes: KeyBinding,
+    #[serde(default = "default_refresh")]
+    pub refresh: KeyBinding,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +127,10 @@ fn default_toggle_remotes() -> KeyBinding {
     parse_key_binding("alt+r").expect("default keybinding is valid")
 }
 
+fn default_refresh() -> KeyBinding {
+    parse_key_binding("ctrl+r").expect("default keybinding is valid")
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -140,6 +146,7 @@ impl Default for Keybindings {
             confirm: default_confirm(),
             cancel: default_cancel(),
             toggle_remotes: default_toggle_remotes(),
+            refresh: default_refresh(),
         }
     }
 }
@@ -183,6 +190,7 @@ mod tests {
         assert_eq!(config.keybindings.confirm.display(), "enter");
         assert_eq!(config.keybindings.cancel.display(), "esc");
         assert_eq!(config.keybindings.toggle_remotes.display(), "alt+r");
+        assert_eq!(config.keybindings.refresh.display(), "ctrl+r");
     }
 
     #[test]
@@ -193,6 +201,7 @@ mod tests {
             confirm = "ctrl+o"
             cancel = "ctrl+c"
             toggle_remotes = "ctrl+r"
+            refresh = "alt+f"
             "#,
         )
         .unwrap();
@@ -209,6 +218,10 @@ mod tests {
             .keybindings
             .toggle_remotes
             .matches(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+        assert!(config
+            .keybindings
+            .refresh
+            .matches(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)));
     }
 
     #[test]

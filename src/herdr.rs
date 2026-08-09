@@ -102,14 +102,6 @@ pub fn get_plugin_pane_id(pane_json: &Value, label: &str) -> Option<String> {
         .and_then(|p| p.get("pane_id")?.as_str().map(String::from))
 }
 
-pub fn get_any_plugin_pane_id(pane_json: &Value, label: &str) -> Option<String> {
-    let panes = pane_json.pointer("/result/panes")?.as_array()?;
-    panes
-        .iter()
-        .find(|p| p.get("label").and_then(|v| v.as_str()) == Some(label))
-        .and_then(|p| p.get("pane_id")?.as_str().map(String::from))
-}
-
 pub fn workspace_close(workspace_id: &str) -> Result<(), String> {
     run_herdr(["workspace", "close", workspace_id])
 }
@@ -146,42 +138,12 @@ pub fn get_own_pane_id_from_env() -> Option<String> {
         .and_then(|v| v.get("pane_id")?.as_str().map(String::from))
 }
 
-/// Get workspace context from HERDR_PLUGIN_CONTEXT_JSON env var.
-/// Returns (workspace_id, cwd) tuple when available.
-pub fn get_action_context_from_env() -> Option<(String, String)> {
-    env::var("HERDR_PLUGIN_CONTEXT_JSON")
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| {
-            let workspace_id = v.get("workspace_id")?.as_str()?;
-            // Try workspace_cwd first, then focused_pane_cwd, then fall back
-            let cwd = v
-                .get("workspace_cwd")
-                .and_then(|x| x.as_str())
-                .or_else(|| v.get("focused_pane_cwd").and_then(|x| x.as_str()))?;
-            Some((workspace_id.to_string(), cwd.to_string()))
-        })
-}
-
 // Get focused workspace ID from herdr snapshot
 pub fn get_focused_workspace_id(snapshot: &Value) -> Option<String> {
     snapshot
         .pointer("/result/snapshot/focused_workspace_id")
         .and_then(|v| v.as_str())
         .map(String::from)
-}
-
-// Get CWD for a given workspace from herdr snapshot
-// Looks up workspace_id in the workspaces array and returns worktree.checkout_path
-pub fn get_workspace_cwd_from_snapshot(snapshot: &Value, workspace_id: &str) -> Option<String> {
-    let workspaces = snapshot
-        .pointer("/result/snapshot/workspaces")?
-        .as_array()?;
-    let workspace = workspaces
-        .iter()
-        .find(|w| w.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace_id))?;
-    let worktree = workspace.get("worktree")?;
-    worktree.get("checkout_path")?.as_str().map(String::from)
 }
 
 // Get the CWD of the current workspace from pane list JSON:

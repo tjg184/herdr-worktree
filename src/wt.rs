@@ -163,14 +163,21 @@ pub fn removal_safety(list: &Value, checkout_path: &str) -> RemovalSafety {
         return RemovalSafety::Unknown;
     };
 
-    let dirty = ["staged", "modified", "untracked", "renamed", "deleted", "conflicted"]
-        .iter()
-        .any(|key| {
-            worktree
-                .pointer(&format!("/changes/{key}"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        });
+    let dirty = [
+        "staged",
+        "modified",
+        "untracked",
+        "renamed",
+        "deleted",
+        "conflicted",
+    ]
+    .iter()
+    .any(|key| {
+        worktree
+            .pointer(&format!("/changes/{key}"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
     if dirty {
         return RemovalSafety::Dirty;
     }
@@ -216,7 +223,6 @@ pub enum EntryKind {
     WorktreeOther,
     BranchLocal,
     BranchRemote,
-    NewWorktree, // Synthetic entry for creating a new worktree
 }
 
 pub fn parse_wt_list(json: &Value) -> Vec<BranchEntry> {
@@ -393,7 +399,10 @@ mod tests {
             }]
         });
 
-        assert_eq!(removal_safety(&dirty, "/repo.feature"), RemovalSafety::Dirty);
+        assert_eq!(
+            removal_safety(&dirty, "/repo.feature"),
+            RemovalSafety::Dirty
+        );
         assert_eq!(
             removal_safety(&unmerged, "/repo.feature"),
             RemovalSafety::BranchNotIntegrated

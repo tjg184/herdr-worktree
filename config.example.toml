@@ -15,4 +15,7 @@ cancel = "esc"
 # Key to toggle remote branches visibility
 toggle_remotes = "alt+r"
 
+# Fetch all remotes and prune deleted refs
+refresh = "ctrl+r"
+
 # Bindings accept alt, ctrl, and shift modifiers, for example "ctrl+o".

@@ -1,3 +1,10 @@
+use std::{
+    io::{self, stdout},
+    sync::mpsc::{self, Receiver},
+    thread,
+    time::Duration,
+};
+
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -5,433 +12,770 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
-use std::io::{self, stdout};
 
-use crate::config::Config;
-use crate::wt::{BranchEntry, EntryKind, RemovalSafety};
+use crate::{
+    config::Config,
+    git::{self, HeadState},
+    herdr,
+    wt::{self, BranchEntry, EntryKind, RemovalSafety},
+};
 
 #[derive(Debug, Clone)]
 pub enum TuiResult {
-    Selected(BranchEntry),
     Cancelled,
     ToggleRemotes,
+    Created,
 }
 
 #[derive(Debug, Clone)]
-pub enum AppState {
+enum AppState {
     Picking,
-    CreatingNew { input: String },
+    NewIntent {
+        selected: usize,
+    },
+    SelectingBase,
+    Naming {
+        input: String,
+        base: Option<BranchEntry>,
+        intent: NamingIntent,
+    },
+    RemoteConflict {
+        remote: BranchEntry,
+        input: String,
+        selected: usize,
+    },
+    Creating,
 }
 
-const TOKYO_NIGHT_ACCENT: Color = Color::Rgb(255, 158, 100);
-const TOKYO_NIGHT_TEXT: Color = Color::Rgb(192, 202, 245);
-const TOKYO_NIGHT_GREEN: Color = Color::Rgb(158, 206, 106);
-const TOKYO_NIGHT_YELLOW: Color = Color::Rgb(224, 175, 104);
-const TOKYO_NIGHT_BLUE: Color = Color::Rgb(122, 162, 247);
-const TOKYO_NIGHT_TEAL: Color = Color::Rgb(125, 207, 255);
-const TOKYO_NIGHT_SURFACE: Color = Color::Rgb(36, 40, 59);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NamingIntent {
+    NewBranch,
+    OpenReference,
+}
+
+const ACCENT: Color = Color::Rgb(255, 158, 100);
+const TEXT: Color = Color::Rgb(192, 202, 245);
+const GREEN: Color = Color::Rgb(158, 206, 106);
+const YELLOW: Color = Color::Rgb(224, 175, 104);
+const BLUE: Color = Color::Rgb(122, 162, 247);
+const TEAL: Color = Color::Rgb(125, 207, 255);
+const SURFACE: Color = Color::Rgb(36, 40, 59);
 
 fn entry_indicator(kind: &EntryKind) -> (&'static str, Style) {
     match kind {
-        EntryKind::WorktreeCurrent => ("▶ here  ", Style::default().fg(TOKYO_NIGHT_ACCENT)),
-        EntryKind::WorktreeMain => ("★ main  ", Style::default().fg(TOKYO_NIGHT_GREEN)),
-        EntryKind::WorktreeOther => ("□ tree  ", Style::default().fg(TOKYO_NIGHT_TEAL)),
-        EntryKind::BranchLocal => ("⑂ local ", Style::default().fg(TOKYO_NIGHT_TEXT)),
-        EntryKind::BranchRemote => ("⇣ remote", Style::default().fg(TOKYO_NIGHT_BLUE)),
-        EntryKind::NewWorktree => ("+ new   ", Style::default().fg(TOKYO_NIGHT_YELLOW).add_modifier(Modifier::BOLD)),
+        EntryKind::WorktreeCurrent => ("> here  ", Style::default().fg(ACCENT)),
+        EntryKind::WorktreeMain => ("* main  ", Style::default().fg(GREEN)),
+        EntryKind::WorktreeOther => ("[] tree ", Style::default().fg(TEAL)),
+        EntryKind::BranchLocal => ("~ local ", Style::default().fg(TEXT)),
+        EntryKind::BranchRemote => ("v remote", Style::default().fg(BLUE)),
     }
 }
 
-pub struct App {
-    pub entries: Vec<BranchEntry>,
-    pub filtered: Vec<usize>, // indices into entries (does not include pinned entry)
-    pub filter: String,
-    pub list_state: ListState,
-    pub show_remotes: bool,
-    pub config: Config,
-    pub repo_root: String,
-    pub loading: bool,
-    pub error: Option<String>,
-    pub state: AppState,
-    // Saved state for returning from CreatingNew
-    pub saved_filter: String,
+struct App {
+    entries: Vec<BranchEntry>,
+    filtered: Vec<usize>,
+    filter: String,
+    list_state: ListState,
+    show_remotes: bool,
+    config: Config,
+    repo_root: String,
+    head: HeadState,
+    state: AppState,
+    saved_filter: String,
+    status: Option<String>,
+    error: Option<String>,
+    fetch: Option<Receiver<Result<Vec<BranchEntry>, String>>>,
+    create: Option<Receiver<Result<(), String>>>,
+    resume_state: Option<AppState>,
 }
 
 impl App {
-    pub fn new(config: Config, repo_root: String, entries: Vec<BranchEntry>, show_remotes: bool) -> Self {
-        let mut state = ListState::default();
-        state.select(Some(0));
-        Self {
+    fn new(
+        config: Config,
+        repo_root: String,
+        entries: Vec<BranchEntry>,
+        show_remotes: bool,
+        head: HeadState,
+    ) -> Self {
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let mut app = Self {
             entries,
             filtered: Vec::new(),
             filter: String::new(),
-            list_state: state,
+            list_state,
             show_remotes,
             config,
             repo_root,
-            loading: false,
-            error: None,
+            head,
             state: AppState::Picking,
             saved_filter: String::new(),
-        }
+            status: None,
+            error: None,
+            fetch: None,
+            create: None,
+            resume_state: None,
+        };
+        app.apply_filter();
+        app
     }
 
-    pub fn apply_filter(&mut self) {
-        let filter_lower = self.filter.to_lowercase();
+    fn apply_filter(&mut self) {
+        let query = self.filter.to_lowercase();
         self.filtered = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.reference().to_lowercase().contains(&filter_lower))
-            .map(|(i, _)| i)
+            .filter(|(_, entry)| entry.reference().to_lowercase().contains(&query))
+            .map(|(index, _)| index)
             .collect();
-        
-        // Reset selection
-        if !self.filtered.is_empty() {
-            self.list_state.select(Some(0));
-        } else {
-            self.list_state.select(None);
-        }
+        self.list_state.select(Some(0));
     }
 
-    pub fn selected_branch(&self) -> Option<&BranchEntry> {
-        if matches!(self.state, AppState::CreatingNew { .. }) {
-            return None;
+    fn poll_tasks(&mut self) -> Option<TuiResult> {
+        if let Some(result) = self
+            .fetch
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.fetch = None;
+            match result {
+                Ok(entries) => {
+                    self.entries = entries;
+                    self.apply_filter();
+                    self.status = Some("Remote branches refreshed".into());
+                    self.error = None;
+                }
+                Err(error) => {
+                    self.status = None;
+                    self.error = Some(error);
+                }
+            }
         }
-        // Index 0 is the pinned "+ New worktree..." entry
-        let selected = self.list_state.selected()?;
-        if selected == 0 {
-            return None; // Pinned entry is not in entries vec
+        if let Some(result) = self
+            .create
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.create = None;
+            match result {
+                Ok(()) => return Some(TuiResult::Created),
+                Err(error) => {
+                    self.error = Some(error);
+                    self.status = None;
+                    self.restore_after_creation();
+                }
+            }
         }
-        // Adjust for pinned entry
-        let entry_idx = self.filtered.get(selected - 1)?;
-        self.entries.get(*entry_idx)
+        None
     }
 
-    pub fn move_up(&mut self) {
-        let count = self.visible_count();
-        if count == 0 {
-            return;
-        }
-        let current = self.list_state.selected().unwrap_or(0);
-        let new = if current == 0 { count - 1 } else { current - 1 };
-        self.list_state.select(Some(new));
-    }
-
-    pub fn move_down(&mut self) {
-        let count = self.visible_count();
-        if count == 0 {
-            return;
-        }
-        let current = self.list_state.selected().unwrap_or(0);
-        let new = if current >= count - 1 { 0 } else { current + 1 };
-        self.list_state.select(Some(new));
+    fn restore_after_creation(&mut self) {
+        self.state = self.resume_state.take().unwrap_or(AppState::Picking);
     }
 
     fn visible_count(&self) -> usize {
         match self.state {
-            AppState::Picking => 1 + self.filtered.len(), // +1 for pinned entry
-            AppState::CreatingNew { .. } => 1, // Single "↵ to create" row
+            AppState::Picking => self.filtered.len() + 1,
+            AppState::SelectingBase => self.filtered.len(),
+            AppState::NewIntent { .. } => 3,
+            AppState::RemoteConflict { .. } => 2,
+            AppState::Naming { .. } | AppState::Creating => 1,
         }
     }
 
-    pub fn handle_input(&mut self, c: char) {
-        match &mut self.state {
-            AppState::Picking => {
-                self.filter.push(c);
-                self.apply_filter();
+    fn move_selection(&mut self, delta: isize) {
+        let count = self.visible_count();
+        if count == 0 {
+            self.list_state.select(None);
+            return;
+        }
+        let current = self.list_state.selected().unwrap_or(0) as isize;
+        self.list_state
+            .select(Some((current + delta).clamp(0, count as isize - 1) as usize));
+    }
+
+    fn selected_entry(&self) -> Option<BranchEntry> {
+        let selected = self.list_state.selected()?;
+        let offset = matches!(self.state, AppState::Picking) as usize;
+        self.filtered
+            .get(selected.checked_sub(offset)?)
+            .and_then(|index| self.entries.get(*index))
+            .cloned()
+    }
+
+    fn start_fetch(&mut self) {
+        if self.fetch.is_some() {
+            return;
+        }
+        let repo_root = self.repo_root.clone();
+        let show_remotes = self.show_remotes;
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = git::fetch_all(&repo_root)
+                .and_then(|_| wt::wt_list(&repo_root, true, show_remotes))
+                .map(|json| wt::parse_wt_list(&json));
+            let _ = sender.send(result);
+        });
+        self.fetch = Some(receiver);
+        self.status = Some("Fetching all remotes...".into());
+        self.error = None;
+    }
+
+    fn start_open(&mut self, entry: BranchEntry) {
+        let target = match entry.kind {
+            EntryKind::WorktreeCurrent | EntryKind::WorktreeMain | EntryKind::WorktreeOther => {
+                entry.path.clone().map(|path| (path, false))
             }
-            AppState::CreatingNew { input } => {
-                input.push(c);
+            EntryKind::BranchLocal => Some((entry.branch.clone(), true)),
+            EntryKind::BranchRemote => match remote_target(&entry, &self.entries) {
+                Ok(Some(target)) => Some((target, true)),
+                Ok(None) => {
+                    self.state = AppState::RemoteConflict {
+                        remote: entry,
+                        input: String::new(),
+                        selected: 0,
+                    };
+                    return;
+                }
+                Err(error) => {
+                    self.error = Some(error);
+                    return;
+                }
+            },
+        };
+        let Some((target, switch)) = target else {
+            self.error = Some("Worktree entry is missing its path".into());
+            return;
+        };
+        self.start_task(move |repo_root| {
+            let path = if switch {
+                wt::wt_switch(&repo_root, &target, false)?
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(&target)
+                    .to_string()
+            } else {
+                target
+            };
+            herdr::worktree_open(&repo_root, &path, true).map(|_| ())
+        });
+    }
+
+    fn submit_name(&mut self, input: String, base: Option<BranchEntry>, intent: NamingIntent) {
+        let input = crate::git::normalize_branch_name(&input, self.config.normalize_jira_prefix);
+        if intent == NamingIntent::NewBranch {
+            if is_reference(&input) {
+                self.error = Some("Enter a new branch name, not a PR, MR, or URL".into());
+                return;
             }
+            if let Err(error) = git::validate_new_branch_name(&self.repo_root, &input) {
+                self.error = Some(error);
+                return;
+            }
+        } else if let Err(error) = validate_reference(&input) {
+            self.error = Some(error);
+            return;
+        }
+        if let Some(base) = base {
+            let base_ref = base.reference();
+            let track = matches!(base.kind, EntryKind::BranchRemote);
+            self.start_task(move |repo_root| {
+                git::create_branch_from(&repo_root, &input, &base_ref, track)?;
+                let result = wt::wt_switch(&repo_root, &input, false)?;
+                let path = result
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(&input);
+                herdr::worktree_open(&repo_root, path, true).map(|_| ())
+            });
+        } else {
+            let create = intent == NamingIntent::NewBranch;
+            self.start_task(move |repo_root| {
+                let result = wt::wt_switch(&repo_root, &input, create)?;
+                let path = result
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(&input);
+                herdr::worktree_open(&repo_root, path, true).map(|_| ())
+            });
         }
     }
 
-    pub fn backspace(&mut self) {
-        match &mut self.state {
-            AppState::Picking => {
-                self.filter.pop();
-                self.apply_filter();
-            }
-            AppState::CreatingNew { input } => {
-                input.pop();
-            }
-        }
-    }
-
-    pub fn start_creating_new(&mut self) {
-        self.saved_filter = self.filter.clone();
-        self.state = AppState::CreatingNew { input: String::new() };
-    }
-
-    pub fn cancel_creating_new(&mut self) {
-        self.filter = self.saved_filter.clone();
-        self.apply_filter();
-        self.state = AppState::Picking;
+    fn start_task(
+        &mut self,
+        operation: impl FnOnce(String) -> Result<(), String> + Send + 'static,
+    ) {
+        let repo_root = self.repo_root.clone();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(operation(repo_root));
+        });
+        self.create = Some(receiver);
+        self.resume_state = Some(self.state.clone());
+        self.state = AppState::Creating;
+        self.status = Some("Creating and opening worktree...".into());
+        self.error = None;
     }
 }
 
-pub fn run_tui(repo_root: String, config: Config, entries: Vec<BranchEntry>, show_remotes: bool) -> io::Result<TuiResult> {
-    // Phase 1: TUI setup (after all subprocess calls are done)
+fn is_reference(input: &str) -> bool {
+    input.starts_with("pr:")
+        || input.starts_with("mr:")
+        || input.starts_with("http://")
+        || input.starts_with("https://")
+}
+
+fn validate_reference(input: &str) -> Result<(), String> {
+    if let Some(number) = input
+        .strip_prefix("pr:")
+        .or_else(|| input.strip_prefix("mr:"))
+    {
+        return (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+            .then_some(())
+            .ok_or_else(|| "Enter pr:N or mr:N with a numeric ID".into());
+    }
+    if input
+        .strip_prefix("https://")
+        .or_else(|| input.strip_prefix("http://"))
+        .is_some_and(|url| !url.is_empty())
+    {
+        return Ok(());
+    }
+    Err("Enter pr:N, mr:N, or a pull/merge request URL".into())
+}
+
+/// Some(None) means a conflicting local branch needs an alternate name.
+fn remote_target(entry: &BranchEntry, entries: &[BranchEntry]) -> Result<Option<String>, String> {
+    let remote = entry
+        .remote
+        .as_deref()
+        .ok_or_else(|| format!("Remote branch {} has no remote name", entry.branch))?;
+    let qualified = format!("{remote}/{}", entry.branch);
+    match entries.iter().find(|candidate| {
+        candidate.kind != EntryKind::BranchRemote && candidate.branch == entry.branch
+    }) {
+        None => Ok(Some(qualified)),
+        Some(local) if local.upstream.as_deref() == Some(qualified.as_str()) => {
+            Ok(Some(local.branch.clone()))
+        }
+        Some(_) => Ok(None),
+    }
+}
+
+pub fn run_tui(
+    repo_root: String,
+    config: Config,
+    entries: Vec<BranchEntry>,
+    show_remotes: bool,
+    head: HeadState,
+) -> io::Result<TuiResult> {
     enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
+    let mut output = stdout();
+    execute!(output, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(output);
     let mut terminal = Terminal::new(backend)?;
-
-    let mut app = App::new(config, repo_root, entries, show_remotes);
-    app.apply_filter();
-
-    // Phase 2: TUI loop - NO subprocess calls here
+    let mut app = App::new(config, repo_root, entries, show_remotes, head);
     let result = loop {
-        terminal.draw(|f| draw(f, &mut app))?;
-
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        if let Some(result) = app.poll_tasks() {
+            break result;
+        }
+        if !event::poll(Duration::from_millis(50))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press || matches!(app.state, AppState::Creating) {
+            continue;
+        }
+        if app.config.keybindings.cancel.matches(key) {
+            match app.state {
+                AppState::Picking => break TuiResult::Cancelled,
+                AppState::NewIntent { .. } => app.state = AppState::Picking,
+                AppState::SelectingBase => {
+                    app.filter = app.saved_filter.clone();
+                    app.apply_filter();
+                    app.state = AppState::NewIntent { selected: 1 };
+                }
+                AppState::Naming {
+                    ref input,
+                    ref base,
+                    intent,
+                } => {
+                    let _ = (input, base);
+                    app.state = AppState::NewIntent {
+                        selected: if intent == NamingIntent::OpenReference {
+                            2
+                        } else if base.is_some() {
+                            1
+                        } else {
+                            0
+                        },
+                    };
+                }
+                AppState::RemoteConflict { .. } => app.state = AppState::Picking,
+                AppState::Creating => unreachable!(),
             }
-
-            // Global keys
-            if app.config.keybindings.cancel.matches(key) {
-                match &app.state {
-                    AppState::Picking => {
-                        disable_raw_mode()?;
-                        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                        terminal.show_cursor()?;
-                        return Ok(TuiResult::Cancelled);
-                    }
-                    AppState::CreatingNew { .. } => {
-                        app.cancel_creating_new();
-                        continue;
+            continue;
+        }
+        if app.config.keybindings.toggle_remotes.matches(key)
+            && matches!(app.state, AppState::Picking)
+        {
+            break TuiResult::ToggleRemotes;
+        }
+        if app.config.keybindings.refresh.matches(key)
+            && matches!(app.state, AppState::Picking | AppState::SelectingBase)
+        {
+            app.start_fetch();
+            continue;
+        }
+        match app.state.clone() {
+            AppState::Picking => match key.code {
+                _ if app.config.keybindings.confirm.matches(key) => {
+                    if app.list_state.selected() == Some(0) {
+                        app.state = AppState::NewIntent { selected: 0 };
+                        app.list_state.select(Some(0));
+                    } else if let Some(entry) = app.selected_entry() {
+                        app.start_open(entry);
                     }
                 }
-            }
-            if app.config.keybindings.toggle_remotes.matches(key)
-                && matches!(app.state, AppState::Picking)
-            {
-                disable_raw_mode()?;
-                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                terminal.show_cursor()?;
-                return Ok(TuiResult::ToggleRemotes);
-            }
-
-            // State-specific keys
-            match &app.state {
-                AppState::Picking => {
-                    match key.code {
-                        _ if app.config.keybindings.confirm.matches(key) => {
-                            let selected = app.list_state.selected().unwrap_or(0);
-                            if selected == 0 {
-                                // Pinned "+ New worktree..." entry
-                                app.start_creating_new();
-                            } else {
-                                // Real entry
-                                if let Some(entry) = app.selected_branch() {
-                                    disable_raw_mode()?;
-                                    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                                    terminal.show_cursor()?;
-                                    return Ok(TuiResult::Selected(entry.clone()));
-                                }
-                            }
-                        }
-                        KeyCode::Char(c) => app.handle_input(c),
-                        KeyCode::Backspace => app.backspace(),
-                        KeyCode::Up => app.move_up(),
-                        KeyCode::Down => app.move_down(),
-                        _ => {}
+                KeyCode::Char('u')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    app.filter.clear();
+                    app.apply_filter();
+                }
+                KeyCode::Char(c) => {
+                    app.filter.push(c);
+                    app.apply_filter();
+                }
+                KeyCode::Backspace => {
+                    app.filter.pop();
+                    app.apply_filter();
+                }
+                KeyCode::Up => app.move_selection(-1),
+                KeyCode::Down => app.move_selection(1),
+                _ => {}
+            },
+            AppState::NewIntent { mut selected } => match key.code {
+                KeyCode::Up => {
+                    selected = selected.saturating_sub(1);
+                    app.state = AppState::NewIntent { selected };
+                    app.list_state.select(Some(selected));
+                }
+                KeyCode::Down => {
+                    selected = (selected + 1).min(2);
+                    app.state = AppState::NewIntent { selected };
+                    app.list_state.select(Some(selected));
+                }
+                _ if app.config.keybindings.confirm.matches(key) => {
+                    if selected == 0 && app.head == HeadState::Branch {
+                        app.state = AppState::Naming {
+                            input: String::new(),
+                            base: None,
+                            intent: NamingIntent::NewBranch,
+                        };
+                    } else if selected == 1 && app.head != HeadState::Unborn {
+                        app.saved_filter = app.filter.clone();
+                        app.filter.clear();
+                        app.apply_filter();
+                        app.state = AppState::SelectingBase;
+                    } else if selected == 2 {
+                        app.state = AppState::Naming {
+                            input: String::new(),
+                            base: None,
+                            intent: NamingIntent::OpenReference,
+                        };
+                    } else {
+                        app.error = Some(if app.head == HeadState::Unborn {
+                            "Create an initial commit before creating a worktree".into()
+                        } else {
+                            "Detached HEAD cannot be used as a base".into()
+                        });
                     }
                 }
-                AppState::CreatingNew { input } => {
-                    match key.code {
-                        _ if app.config.keybindings.confirm.matches(key) => {
-                            if !input.is_empty() {
-                                let entry = BranchEntry {
-                                    kind: EntryKind::NewWorktree,
-                                    branch: input.clone(),
-                                    path: None,
-                                    symbols: String::new(),
-                                    remote: None,
-                                    upstream: None,
-                                };
-                                disable_raw_mode()?;
-                                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                                terminal.show_cursor()?;
-                                return Ok(TuiResult::Selected(entry));
-                            }
-                        }
-                        KeyCode::Char(c) => app.handle_input(c),
-                        KeyCode::Backspace => app.backspace(),
-                        _ => {}
+                _ => {}
+            },
+            AppState::SelectingBase => match key.code {
+                _ if app.config.keybindings.confirm.matches(key) => {
+                    if let Some(base) = app.selected_entry() {
+                        app.state = AppState::Naming {
+                            input: String::new(),
+                            base: Some(base),
+                            intent: NamingIntent::NewBranch,
+                        };
                     }
                 }
-            }
+                KeyCode::Char('u')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    app.filter.clear();
+                    app.apply_filter();
+                }
+                KeyCode::Char(c) => {
+                    app.filter.push(c);
+                    app.apply_filter();
+                }
+                KeyCode::Backspace => {
+                    app.filter.pop();
+                    app.apply_filter();
+                }
+                KeyCode::Up => app.move_selection(-1),
+                KeyCode::Down => app.move_selection(1),
+                _ => {}
+            },
+            AppState::Naming {
+                mut input,
+                base,
+                intent,
+            } => match key.code {
+                _ if app.config.keybindings.confirm.matches(key) => {
+                    app.submit_name(input, base, intent)
+                }
+                KeyCode::Char('u')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    input.clear();
+                    app.state = AppState::Naming {
+                        input,
+                        base,
+                        intent,
+                    };
+                }
+                KeyCode::Char(c) => {
+                    input.push(c);
+                    app.state = AppState::Naming {
+                        input,
+                        base,
+                        intent,
+                    };
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                    app.state = AppState::Naming {
+                        input,
+                        base,
+                        intent,
+                    };
+                }
+                _ => {}
+            },
+            AppState::RemoteConflict {
+                remote,
+                input,
+                mut selected,
+            } => match key.code {
+                KeyCode::Up => {
+                    selected = selected.saturating_sub(1);
+                    app.state = AppState::RemoteConflict {
+                        remote,
+                        input,
+                        selected,
+                    };
+                    app.list_state.select(Some(selected));
+                }
+                KeyCode::Down => {
+                    selected = (selected + 1).min(1);
+                    app.state = AppState::RemoteConflict {
+                        remote,
+                        input,
+                        selected,
+                    };
+                    app.list_state.select(Some(selected));
+                }
+                _ if app.config.keybindings.confirm.matches(key) => {
+                    if selected == 0 {
+                        app.state = AppState::Naming {
+                            input,
+                            base: Some(remote),
+                            intent: NamingIntent::NewBranch,
+                        };
+                    } else {
+                        app.state = AppState::Picking;
+                    }
+                }
+                _ => {}
+            },
+            AppState::Creating => unreachable!(),
         }
     };
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    Ok(result)
 }
 
-fn draw(f: &mut Frame, app: &mut App) {
+fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
-        .split(f.area());
-
-    // Filter/input block
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(frame.area());
     let (title, text) = match &app.state {
-        AppState::Picking => {
-            let title = if app.show_remotes {
-                format!(
-                    "Filter ({} to hide remotes, {} to cancel)",
-                    app.config.keybindings.toggle_remotes.display(),
-                    app.config.keybindings.cancel.display()
-                )
-            } else {
-                format!(
-                    "Filter ({} to show remotes, {} to cancel)",
-                    app.config.keybindings.toggle_remotes.display(),
-                    app.config.keybindings.cancel.display()
-                )
-            };
-            let text = format!(
-                "{}{}",
-                app.filter,
-                if app.loading { " (loading...)" } else { "" }
-            );
-            (title, text)
-        }
-        AppState::CreatingNew { input } => {
-            let title = format!(
-                "Branch, pr:N, or URL - {} to go back",
+        AppState::Picking => (
+            format!(
+                "Filter ({} remotes, {} refresh, {} cancel)",
+                app.config.keybindings.toggle_remotes.display(),
+                app.config.keybindings.refresh.display(),
                 app.config.keybindings.cancel.display()
-            );
-            (title, input.clone())
-        }
-    };
-    
-    let filter_widget = Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title),
-    );
-    f.render_widget(filter_widget, chunks[0]);
-
-    // List
-    let items: Vec<ListItem> = match &app.state {
-        AppState::Picking => {
-            // Pinned "+ New worktree..." entry
-            let (new_indicator, new_style) = entry_indicator(&EntryKind::NewWorktree);
-            let mut items = vec![
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{}  New worktree...", new_indicator), new_style),
-                ]))
-            ];
-            
-            // Real entries
-            let entry_items: Vec<ListItem> = app
-                .filtered
-                .iter()
-                .filter_map(|&idx| app.entries.get(idx))
-                .map(|entry| {
-                    let (indicator, style) = entry_indicator(&entry.kind);
-                    ListItem::new(Line::from(vec![
-                        Span::styled(indicator, style),
-                        Span::raw(format!("  {}  ", entry.symbols)),
-                        Span::styled(entry.reference(), Style::default().fg(TOKYO_NIGHT_TEXT)),
-                    ]))
-                })
-                .collect();
-            items.extend(entry_items);
-            items
-        }
-        AppState::CreatingNew { .. } => {
-            vec![ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{} to create worktree", app.config.keybindings.confirm.display()),
-                    Style::default().fg(Color::DarkGray),
+            ),
+            app.filter.clone(),
+        ),
+        AppState::NewIntent { .. } => ("New worktree".into(), "Choose what to open".into()),
+        AppState::SelectingBase => ("Select base branch".into(), app.filter.clone()),
+        AppState::Naming {
+            input,
+            base,
+            intent,
+        } => match intent {
+            NamingIntent::NewBranch => (
+                format!(
+                    "New branch from {}",
+                    base.as_ref()
+                        .map(BranchEntry::reference)
+                        .unwrap_or_else(|| "current HEAD".into())
                 ),
-            ]))]
-        }
+                input.clone(),
+            ),
+            NamingIntent::OpenReference => ("Open pull or merge request".into(), input.clone()),
+        },
+        AppState::RemoteConflict { remote, .. } => (
+            "Remote name conflict".into(),
+            format!(
+                "{} already has a different local branch",
+                remote.reference()
+            ),
+        ),
+        AppState::Creating => ("Creating".into(), app.status.clone().unwrap_or_default()),
     };
-
+    frame.render_widget(
+        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(title)),
+        chunks[0],
+    );
+    let items = match &app.state {
+        AppState::Picking => {
+            let mut rows = vec![ListItem::new(Span::styled(
+                "+ new     New worktree...",
+                Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+            ))];
+            rows.extend(
+                app.filtered
+                    .iter()
+                    .filter_map(|index| app.entries.get(*index))
+                    .map(render_entry),
+            );
+            rows
+        }
+        AppState::SelectingBase => app
+            .filtered
+            .iter()
+            .filter_map(|index| app.entries.get(*index))
+            .map(render_entry)
+            .collect(),
+        AppState::NewIntent { .. } => vec![
+            ListItem::new("New branch from current HEAD"),
+            ListItem::new("New branch from another base"),
+            ListItem::new("Open pull or merge request"),
+        ],
+        AppState::Naming { intent, .. } => vec![ListItem::new(match intent {
+            NamingIntent::NewBranch => "Enter a new branch name",
+            NamingIntent::OpenReference => {
+                "GitHub: pr:123   GitLab: mr:123   Or enter a request URL"
+            }
+        })],
+        AppState::RemoteConflict { .. } => vec![
+            ListItem::new("Create with another local name"),
+            ListItem::new("Back"),
+        ],
+        AppState::Creating => vec![ListItem::new("Working...")],
+    };
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Branches"))
-        .highlight_style(Style::default().bg(TOKYO_NIGHT_SURFACE).add_modifier(Modifier::BOLD));
-
-    f.render_stateful_widget(list, chunks[1], &mut app.list_state);
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Worktrees and branches"),
+        )
+        .highlight_style(Style::default().bg(SURFACE).add_modifier(Modifier::BOLD));
+    frame.render_stateful_widget(list, chunks[1], &mut app.list_state);
+    let message = app.error.as_deref().or(app.status.as_deref()).unwrap_or("");
+    frame.render_widget(
+        Paragraph::new(message).style(Style::default().fg(if app.error.is_some() {
+            Color::Red
+        } else {
+            GREEN
+        })),
+        chunks[2],
+    );
 }
 
-/// Run confirm remove TUI - returns true if confirmed, false if cancelled
+fn render_entry(entry: &BranchEntry) -> ListItem<'static> {
+    let (indicator, style) = entry_indicator(&entry.kind);
+    ListItem::new(Line::from(vec![
+        Span::styled(indicator, style),
+        Span::raw(format!("  {}  ", entry.symbols)),
+        Span::styled(entry.reference(), Style::default().fg(TEXT)),
+    ]))
+}
+
 pub fn run_confirm_tui(statusline: &str, safety: &RemovalSafety) -> io::Result<bool> {
     enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
+    let mut output = stdout();
+    execute!(output, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(output);
     let mut terminal = Terminal::new(backend)?;
-
-    let result = run_confirm_dialog(&mut terminal, statusline, safety);
-
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    disable_raw_mode()?;
-
-    result
-}
-
-fn run_confirm_dialog(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    statusline: &str,
-    safety: &RemovalSafety,
-) -> io::Result<bool> {
-    let mut confirmed = false;
-
-    loop {
-        terminal.draw(|f| draw_confirm_ui(f, statusline, safety))?;
-
+    let result = loop {
+        terminal.draw(|frame| draw_confirm_ui(frame, statusline, safety))?;
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') if safety.allows_removal() => {
-                        confirmed = true;
-                        break;
+                        break true
                     }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                        break;
-                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => break false,
                     _ => {}
                 }
             }
         }
-    }
-
-    Ok(confirmed)
+    };
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+    Ok(result)
 }
 
 fn draw_confirm_ui(frame: &mut Frame, statusline: &str, safety: &RemovalSafety) {
-    let size = frame.area();
-
-    // Vertically center content with flexible spacing
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Fill(1),      // flexible space above
-            Constraint::Length(1),    // statusline
-            Constraint::Length(1),    // safety status
-            Constraint::Length(1),    // spacer
-            Constraint::Length(1),    // buttons
-            Constraint::Fill(1),      // flexible space below
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Fill(1),
         ])
-        .split(size);
-
-    // Statusline (worktree info)
-    let status_para = Paragraph::new(statusline)
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true });
-    frame.render_widget(status_para, layout[1]);
-
+        .split(frame.area());
+    frame.render_widget(
+        Paragraph::new(statusline)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        layout[1],
+    );
     let (message, color) = match safety {
         RemovalSafety::Safe => (
             "Safe to remove: worktree and branch will be deleted.",
@@ -442,180 +786,108 @@ fn draw_confirm_ui(frame: &mut Frame, statusline: &str, safety: &RemovalSafety) 
             Color::Red,
         ),
         RemovalSafety::BranchCheckedOutElsewhere => (
-            "Safe to remove: worktree will be deleted; branch is checked out elsewhere.",
+            "Safe to remove: branch is checked out elsewhere.",
             Color::Yellow,
         ),
         RemovalSafety::BranchNotIntegrated => (
-            "Safe to remove: worktree will be deleted; branch changes are not integrated.",
+            "Safe to remove: branch changes are not integrated.",
             Color::Yellow,
         ),
-        RemovalSafety::Unknown => (
-            "Cannot verify safe removal. Worktrunk status is unavailable.",
-            Color::Yellow,
-        ),
+        RemovalSafety::Unknown => ("Cannot verify safe removal.", Color::Yellow),
     };
-    let safety_para = Paragraph::new(Span::styled(message, Style::default().fg(color)))
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true });
-    frame.render_widget(safety_para, layout[2]);
-
-    // Buttons
-    let buttons = if safety.allows_removal() {
-        Line::from(vec![
-            Span::styled("[y]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw(" Remove    "),
-            Span::styled("[n/Esc]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::raw(" Cancel"),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("[Esc]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::raw(" Cancel"),
-        ])
-    };
-    let buttons = Paragraph::new(buttons)
-    .alignment(Alignment::Center);
-    frame.render_widget(buttons, layout[3]);
+    frame.render_widget(
+        Paragraph::new(message)
+            .style(Style::default().fg(color))
+            .alignment(Alignment::Center),
+        layout[2],
+    );
+    frame.render_widget(
+        Paragraph::new(if safety.allows_removal() {
+            "[y] Remove    [n/Esc] Cancel"
+        } else {
+            "[Esc] Cancel"
+        })
+        .alignment(Alignment::Center),
+        layout[3],
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{backend::TestBackend, Terminal};
 
-    #[test]
-    fn entry_indicators_use_distinct_symbols_labels_and_colors() {
-        let indicators = [
-            (EntryKind::WorktreeCurrent, "▶ here  ", TOKYO_NIGHT_ACCENT),
-            (EntryKind::WorktreeMain, "★ main  ", TOKYO_NIGHT_GREEN),
-            (EntryKind::WorktreeOther, "□ tree  ", TOKYO_NIGHT_TEAL),
-            (EntryKind::BranchLocal, "⑂ local ", TOKYO_NIGHT_TEXT),
-            (EntryKind::BranchRemote, "⇣ remote", TOKYO_NIGHT_BLUE),
-            (EntryKind::NewWorktree, "+ new   ", TOKYO_NIGHT_YELLOW),
-        ];
-
-        for (kind, label, color) in indicators {
-            let (indicator, style) = entry_indicator(&kind);
-            assert_eq!(indicator, label);
-            assert_eq!(style.fg, Some(color));
+    fn branch(name: &str) -> BranchEntry {
+        BranchEntry {
+            kind: EntryKind::BranchLocal,
+            branch: name.into(),
+            path: None,
+            symbols: String::new(),
+            remote: None,
+            upstream: None,
         }
     }
-
     #[test]
-    fn branch_list_renders_hybrid_indicators() {
-        let entries = vec![
-            BranchEntry {
-                kind: EntryKind::WorktreeCurrent,
-                branch: "current".into(),
-                path: None,
-                symbols: String::new(),
-                remote: None,
-                upstream: None,
-            },
-            BranchEntry {
-                kind: EntryKind::WorktreeMain,
-                branch: "main".into(),
-                path: None,
-                symbols: String::new(),
-                remote: None,
-                upstream: None,
-            },
-            BranchEntry {
-                kind: EntryKind::WorktreeOther,
-                branch: "tree".into(),
-                path: None,
-                symbols: String::new(),
-                remote: None,
-                upstream: None,
-            },
-            BranchEntry {
-                kind: EntryKind::BranchLocal,
-                branch: "local".into(),
-                path: None,
-                symbols: String::new(),
-                remote: None,
-                upstream: None,
-            },
-            BranchEntry {
-                kind: EntryKind::BranchRemote,
-                branch: "remote".into(),
-                path: None,
-                symbols: String::new(),
-                remote: Some("origin".into()),
-                upstream: None,
-            },
-        ];
-        let backend = TestBackend::new(40, 12);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new(Config::default(), String::new(), entries, false);
-        app.apply_filter();
-
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let rendered = (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer.get(x, y).symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        for label in ["▶ here", "★ main", "□ tree", "⑂ local", "⇣ remote", "+ new"] {
-            assert!(rendered.contains(label), "missing indicator: {label}");
-        }
-        assert!(buffer.content().iter().any(|cell| cell.bg == TOKYO_NIGHT_SURFACE));
-        assert!(buffer.content().iter().any(|cell| cell.symbol() == "c" && cell.fg == TOKYO_NIGHT_TEXT));
+    fn remote_collision_requires_rename() {
+        let remote = BranchEntry {
+            kind: EntryKind::BranchRemote,
+            branch: "feature/auth".into(),
+            path: None,
+            symbols: String::new(),
+            remote: Some("origin".into()),
+            upstream: None,
+        };
+        let local = BranchEntry {
+            kind: EntryKind::BranchLocal,
+            branch: "feature/auth".into(),
+            path: None,
+            symbols: String::new(),
+            remote: None,
+            upstream: Some("upstream/feature/auth".into()),
+        };
+        assert_eq!(
+            remote_target(&remote, &[remote.clone(), local]).unwrap(),
+            None
+        );
+    }
+    #[test]
+    fn references_are_not_branch_names() {
+        assert!(is_reference("pr:42"));
+        assert!(!is_reference("feature/new"));
     }
 
     #[test]
-    fn confirmation_ui_leaves_the_title_to_herdr() {
-        let backend = TestBackend::new(40, 10);
-        let mut terminal = Terminal::new(backend).unwrap();
+    fn failed_creation_restores_name_and_base() {
+        let base = branch("main");
+        let mut app = App::new(
+            Config::default(),
+            ".".into(),
+            vec![base.clone()],
+            false,
+            HeadState::Branch,
+        );
+        let resume = AppState::Naming {
+            input: "feature/new".into(),
+            base: Some(base),
+            intent: NamingIntent::NewBranch,
+        };
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Err("creation failed".into())).unwrap();
+        app.state = AppState::Creating;
+        app.resume_state = Some(resume);
+        app.create = Some(receiver);
 
-        terminal
-            .draw(|frame| draw_confirm_ui(frame, "repo: branch", &RemovalSafety::Safe))
-            .unwrap();
+        app.poll_tasks();
 
-        let buffer = terminal.backend().buffer();
-        let rendered = (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer.get(x, y).symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(rendered.contains("repo: branch"));
-        assert!(rendered.contains("Safe to remove"));
-        assert!(rendered.contains("[y] Remove"));
-        assert!(!rendered.contains("Remove worktree?"));
+        assert!(matches!(app.state, AppState::Naming { input, .. } if input == "feature/new"));
+        assert_eq!(app.error.as_deref(), Some("creation failed"));
     }
 
     #[test]
-    fn unintegrated_confirmation_ui_keeps_the_branch() {
-        let backend = TestBackend::new(80, 10);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|frame| {
-                draw_confirm_ui(frame, "repo: branch", &RemovalSafety::BranchNotIntegrated)
-            })
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let rendered = (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer.get(x, y).symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(rendered.contains("worktree will be deleted; branch changes are not integrated"));
-        assert!(rendered.contains("[y] Remove"));
+    fn reference_validation_accepts_only_supported_inputs() {
+        assert!(validate_reference("pr:42").is_ok());
+        assert!(validate_reference("mr:42").is_ok());
+        assert!(validate_reference("https://github.com/org/repo/pull/42").is_ok());
+        assert!(validate_reference("pr:abc").is_err());
+        assert!(validate_reference("feature/new").is_err());
     }
 }

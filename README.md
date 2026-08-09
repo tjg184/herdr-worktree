@@ -8,6 +8,8 @@ Interactive worktree picker for Herdr terminal workspace manager.
 - Create new worktrees from branches, pull requests, merge requests, or URLs
 - Jira-style branch name normalization (optional): `ticket-123` → `TICKET-123`
 - Toggle remote branches with `alt+r`
+- Refresh remote branches with `ctrl+r`
+- Create a branch from the current HEAD or a selected local/remote base
 - Auto-focus new worktree after creation
 
 ## Installation
@@ -44,6 +46,7 @@ normalize_jira_prefix = true
 confirm = "enter"
 cancel = "esc"
 toggle_remotes = "alt+r"
+refresh = "ctrl+r"
 ```
 
 Bindings accept `alt`, `ctrl`, and `shift` modifiers, such as `ctrl+o`. Supported named keys are `enter`, `esc`, `tab`, `backspace`, `up`, and `down`.
@@ -76,7 +79,12 @@ description = "remove worktree"
 - `prefix+shift+g` - Open the worktree picker
 - Type to filter branches
 - `alt+r` - Toggle remote branches
+- `ctrl+r` - Fetch all remotes and prune deleted refs
+- `ctrl+u` - Clear the active filter or branch-name input
 - `enter` - Select an existing worktree or branch
-- Select `New worktree...`, then enter a branch name, `pr:123`, `mr:123`, or a pull/merge request URL
+- Select `New worktree...`, then choose one of:
+- `New branch from current HEAD` for a new branch name
+- `New branch from another base` to select a local or remote base, then enter a new branch name
+- `Open pull or merge request` for GitHub `pr:123`, GitLab `mr:123`, or a request URL
 - `esc` - Cancel; while entering a new worktree, return to the picker
 - `prefix+shift+x` - Confirm removal of the focused non-primary worktree
