@@ -39,23 +39,33 @@ pub fn normalize_branch_name(branch: &str, enabled: bool) -> String {
     if !enabled {
         return branch.to_string();
     }
-    
+
     // Pattern: prefix-123 or prefix-123-description
     // Uppercase the prefix portion
     let parts: Vec<&str> = branch.splitn(2, '-').collect();
     if parts.len() >= 2 {
         let prefix = parts[0];
         let rest = &branch[prefix.len() + 1..];
-        
+
         // Check if prefix is alphabetic-starting and rest starts with digits
-        if prefix.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false)
-            && prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            && rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+        if prefix
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic())
+            .unwrap_or(false)
+            && prefix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && rest
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
         {
             return format!("{}-{}", prefix.to_ascii_uppercase(), rest);
         }
     }
-    
+
     branch.to_string()
 }
 
@@ -66,7 +76,10 @@ mod tests {
     #[test]
     fn test_normalize_jira_style() {
         assert_eq!(normalize_branch_name("jira-123", true), "JIRA-123");
-        assert_eq!(normalize_branch_name("jira-123-fix-bug", true), "JIRA-123-fix-bug");
+        assert_eq!(
+            normalize_branch_name("jira-123-fix-bug", true),
+            "JIRA-123-fix-bug"
+        );
         assert_eq!(normalize_branch_name("feature-456", true), "FEATURE-456");
     }
 

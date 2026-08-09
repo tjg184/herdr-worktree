@@ -40,19 +40,20 @@ impl Config {
     pub fn load() -> Self {
         let config_dir = Self::config_dir();
         let config_path = config_dir.join("config.toml");
-        
+
         if let Ok(contents) = std::fs::read_to_string(&config_path) {
             if let Ok(config) = toml::from_str(&contents) {
                 return config;
             }
         }
-        
+
         Self::default()
     }
-    
+
     fn config_dir() -> PathBuf {
         // Use herdr's plugin config directory
-        let plugin_id = env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| "herdr-worktree".to_string());
+        let plugin_id =
+            env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| "herdr-worktree".to_string());
         let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(&home)
             .join(".config")

@@ -32,11 +32,16 @@ pub fn run_herdr<const N: usize>(args: [&str; N]) -> Result<(), String> {
 pub fn open_plugin_pane_with_cwd(plugin: &str, entrypoint: &str, cwd: &str) -> Result<(), String> {
     let status = Command::new(herdr_bin())
         .args([
-            "plugin", "pane", "open",
-            "--plugin", plugin,
-            "--entrypoint", entrypoint,
-            "--env", &format!("HERDR_WORKTREE_CWD={}", cwd),
-            "--focus"
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            plugin,
+            "--entrypoint",
+            entrypoint,
+            "--env",
+            &format!("HERDR_WORKTREE_CWD={}", cwd),
+            "--focus",
         ])
         .status()
         .map_err(|e| e.to_string())?;
@@ -83,24 +88,26 @@ pub fn close_plugin_pane(pane_id: &str) -> Result<(), String> {
 
 pub fn get_plugin_pane_id(pane_json: &Value, label: &str) -> Option<String> {
     let panes = pane_json.pointer("/result/panes")?.as_array()?;
-    let focused = panes.iter().find(|p| {
-        p.get("focused").and_then(|v| v.as_bool()) == Some(true)
-    })?;
+    let focused = panes
+        .iter()
+        .find(|p| p.get("focused").and_then(|v| v.as_bool()) == Some(true))?;
     let workspace = focused.get("workspace_id")?.as_str()?;
-    
-    panes.iter().find(|p| {
-        p.get("label").and_then(|v| v.as_str()) == Some(label)
-            && p.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace)
-    })
-    .and_then(|p| p.get("pane_id")?.as_str().map(String::from))
+
+    panes
+        .iter()
+        .find(|p| {
+            p.get("label").and_then(|v| v.as_str()) == Some(label)
+                && p.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace)
+        })
+        .and_then(|p| p.get("pane_id")?.as_str().map(String::from))
 }
 
 pub fn get_any_plugin_pane_id(pane_json: &Value, label: &str) -> Option<String> {
     let panes = pane_json.pointer("/result/panes")?.as_array()?;
-    panes.iter().find(|p| {
-        p.get("label").and_then(|v| v.as_str()) == Some(label)
-    })
-    .and_then(|p| p.get("pane_id")?.as_str().map(String::from))
+    panes
+        .iter()
+        .find(|p| p.get("label").and_then(|v| v.as_str()) == Some(label))
+        .and_then(|p| p.get("pane_id")?.as_str().map(String::from))
 }
 
 pub fn workspace_close(workspace_id: &str) -> Result<(), String> {
@@ -113,17 +120,14 @@ pub fn show_notification(title: &str, body: &str) -> Result<(), String> {
 
 pub fn worktree_open(repo_root: &str, path: &str, focus: bool) -> Result<Value, String> {
     let mut args = vec![
-        "worktree", "open",
-        "--cwd", repo_root,
-        "--path", path,
-        "--json"
+        "worktree", "open", "--cwd", repo_root, "--path", path, "--json",
     ];
     if focus {
         args.push("--focus");
     } else {
         args.push("--no-focus");
     }
-    
+
     let out = Command::new(herdr_bin())
         .args(&args)
         .output()
@@ -151,7 +155,8 @@ pub fn get_action_context_from_env() -> Option<(String, String)> {
         .and_then(|v| {
             let workspace_id = v.get("workspace_id")?.as_str()?;
             // Try workspace_cwd first, then focused_pane_cwd, then fall back
-            let cwd = v.get("workspace_cwd")
+            let cwd = v
+                .get("workspace_cwd")
                 .and_then(|x| x.as_str())
                 .or_else(|| v.get("focused_pane_cwd").and_then(|x| x.as_str()))?;
             Some((workspace_id.to_string(), cwd.to_string()))
@@ -169,10 +174,12 @@ pub fn get_focused_workspace_id(snapshot: &Value) -> Option<String> {
 // Get CWD for a given workspace from herdr snapshot
 // Looks up workspace_id in the workspaces array and returns worktree.checkout_path
 pub fn get_workspace_cwd_from_snapshot(snapshot: &Value, workspace_id: &str) -> Option<String> {
-    let workspaces = snapshot.pointer("/result/snapshot/workspaces")?.as_array()?;
-    let workspace = workspaces.iter().find(|w| {
-        w.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace_id)
-    })?;
+    let workspaces = snapshot
+        .pointer("/result/snapshot/workspaces")?
+        .as_array()?;
+    let workspace = workspaces
+        .iter()
+        .find(|w| w.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace_id))?;
     let worktree = workspace.get("worktree")?;
     worktree.get("checkout_path")?.as_str().map(String::from)
 }
@@ -183,32 +190,34 @@ pub fn get_workspace_cwd_from_snapshot(snapshot: &Value, workspace_id: &str) -> 
 // 3. Fall back to any pane in that workspace
 pub fn get_workspace_cwd(pane_json: &Value) -> Option<String> {
     let panes = pane_json.pointer("/result/panes")?.as_array()?;
-    
+
     // Get focused pane's workspace
-    let focused = panes.iter().find(|p| {
-        p.get("focused").and_then(|v| v.as_bool()) == Some(true)
-    })?;
+    let focused = panes
+        .iter()
+        .find(|p| p.get("focused").and_then(|v| v.as_bool()) == Some(true))?;
     let workspace_id = focused.get("workspace_id")?.as_str()?;
-    
+
     // Find a shell pane in that workspace
     let shell_pane = panes.iter().find(|p| {
         p.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace_id)
             && p.get("label").and_then(|v| v.as_str()) == Some("shell")
     });
-    
+
     if let Some(pane) = shell_pane {
-        return pane.get("foreground_cwd")
+        return pane
+            .get("foreground_cwd")
             .or_else(|| pane.get("cwd"))
             .and_then(|v| v.as_str())
             .map(String::from);
     }
-    
+
     // Fall back to any pane in the workspace
-    let any_pane = panes.iter().find(|p| {
-        p.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace_id)
-    })?;
-    
-    any_pane.get("foreground_cwd")
+    let any_pane = panes
+        .iter()
+        .find(|p| p.get("workspace_id").and_then(|v| v.as_str()) == Some(workspace_id))?;
+
+    any_pane
+        .get("foreground_cwd")
         .or_else(|| any_pane.get("cwd"))
         .and_then(|v| v.as_str())
         .map(String::from)

@@ -29,6 +29,25 @@ pub enum AppState {
     CreatingNew { input: String },
 }
 
+const TOKYO_NIGHT_ACCENT: Color = Color::Rgb(255, 158, 100);
+const TOKYO_NIGHT_TEXT: Color = Color::Rgb(192, 202, 245);
+const TOKYO_NIGHT_GREEN: Color = Color::Rgb(158, 206, 106);
+const TOKYO_NIGHT_YELLOW: Color = Color::Rgb(224, 175, 104);
+const TOKYO_NIGHT_BLUE: Color = Color::Rgb(122, 162, 247);
+const TOKYO_NIGHT_TEAL: Color = Color::Rgb(125, 207, 255);
+const TOKYO_NIGHT_SURFACE: Color = Color::Rgb(36, 40, 59);
+
+fn entry_indicator(kind: &EntryKind) -> (&'static str, Style) {
+    match kind {
+        EntryKind::WorktreeCurrent => ("▶ here  ", Style::default().fg(TOKYO_NIGHT_ACCENT)),
+        EntryKind::WorktreeMain => ("★ main  ", Style::default().fg(TOKYO_NIGHT_GREEN)),
+        EntryKind::WorktreeOther => ("□ tree  ", Style::default().fg(TOKYO_NIGHT_TEAL)),
+        EntryKind::BranchLocal => ("⑂ local ", Style::default().fg(TOKYO_NIGHT_TEXT)),
+        EntryKind::BranchRemote => ("⇣ remote", Style::default().fg(TOKYO_NIGHT_BLUE)),
+        EntryKind::NewWorktree => ("+ new   ", Style::default().fg(TOKYO_NIGHT_YELLOW).add_modifier(Modifier::BOLD)),
+    }
+}
+
 pub struct App {
     pub entries: Vec<BranchEntry>,
     pub filtered: Vec<usize>, // indices into entries (does not include pinned entry)
@@ -295,9 +314,10 @@ fn draw(f: &mut Frame, app: &mut App) {
     let items: Vec<ListItem> = match &app.state {
         AppState::Picking => {
             // Pinned "+ New worktree..." entry
+            let (new_indicator, new_style) = entry_indicator(&EntryKind::NewWorktree);
             let mut items = vec![
                 ListItem::new(Line::from(vec![
-                    Span::styled("+ New worktree...", Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan)),
+                    Span::styled(format!("{}  New worktree...", new_indicator), new_style),
                 ]))
             ];
             
@@ -307,22 +327,11 @@ fn draw(f: &mut Frame, app: &mut App) {
                 .iter()
                 .filter_map(|&idx| app.entries.get(idx))
                 .map(|entry| {
-                    let symbol = match entry.kind {
-                        EntryKind::WorktreeCurrent => "@",
-                        EntryKind::WorktreeMain => "^",
-                        EntryKind::WorktreeOther => "+",
-                        EntryKind::BranchLocal => "/",
-                        EntryKind::BranchRemote => "|",
-                        EntryKind::NewWorktree => "?",
-                    };
-                    let style = match entry.kind {
-                        EntryKind::WorktreeCurrent => Style::default().fg(Color::Yellow),
-                        EntryKind::WorktreeMain => Style::default().fg(Color::Green),
-                        _ => Style::default(),
-                    };
-                    let text = format!("{} {}  {}", symbol, entry.symbols, entry.branch);
+                    let (indicator, style) = entry_indicator(&entry.kind);
                     ListItem::new(Line::from(vec![
-                        Span::styled(text, style),
+                        Span::styled(indicator, style),
+                        Span::raw(format!("  {}  ", entry.symbols)),
+                        Span::styled(&entry.branch, Style::default().fg(TOKYO_NIGHT_TEXT)),
                     ]))
                 })
                 .collect();
@@ -338,7 +347,7 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title("Branches"))
-        .highlight_style(Style::default().bg(Color::Blue));
+        .highlight_style(Style::default().bg(TOKYO_NIGHT_SURFACE).add_modifier(Modifier::BOLD));
 
     f.render_stateful_widget(list, chunks[1], &mut app.list_state);
 }
@@ -420,6 +429,82 @@ fn draw_confirm_ui(frame: &mut Frame, statusline: &str) {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn entry_indicators_use_distinct_symbols_labels_and_colors() {
+        let indicators = [
+            (EntryKind::WorktreeCurrent, "▶ here  ", TOKYO_NIGHT_ACCENT),
+            (EntryKind::WorktreeMain, "★ main  ", TOKYO_NIGHT_GREEN),
+            (EntryKind::WorktreeOther, "□ tree  ", TOKYO_NIGHT_TEAL),
+            (EntryKind::BranchLocal, "⑂ local ", TOKYO_NIGHT_TEXT),
+            (EntryKind::BranchRemote, "⇣ remote", TOKYO_NIGHT_BLUE),
+            (EntryKind::NewWorktree, "+ new   ", TOKYO_NIGHT_YELLOW),
+        ];
+
+        for (kind, label, color) in indicators {
+            let (indicator, style) = entry_indicator(&kind);
+            assert_eq!(indicator, label);
+            assert_eq!(style.fg, Some(color));
+        }
+    }
+
+    #[test]
+    fn branch_list_renders_hybrid_indicators() {
+        let entries = vec![
+            BranchEntry {
+                kind: EntryKind::WorktreeCurrent,
+                branch: "current".into(),
+                path: None,
+                symbols: String::new(),
+            },
+            BranchEntry {
+                kind: EntryKind::WorktreeMain,
+                branch: "main".into(),
+                path: None,
+                symbols: String::new(),
+            },
+            BranchEntry {
+                kind: EntryKind::WorktreeOther,
+                branch: "tree".into(),
+                path: None,
+                symbols: String::new(),
+            },
+            BranchEntry {
+                kind: EntryKind::BranchLocal,
+                branch: "local".into(),
+                path: None,
+                symbols: String::new(),
+            },
+            BranchEntry {
+                kind: EntryKind::BranchRemote,
+                branch: "remote".into(),
+                path: None,
+                symbols: String::new(),
+            },
+        ];
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default(), String::new(), entries, false);
+        app.apply_filter();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.get(x, y).symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for label in ["▶ here", "★ main", "□ tree", "⑂ local", "⇣ remote", "+ new"] {
+            assert!(rendered.contains(label), "missing indicator: {label}");
+        }
+        assert!(buffer.content().iter().any(|cell| cell.bg == TOKYO_NIGHT_SURFACE));
+        assert!(buffer.content().iter().any(|cell| cell.symbol() == "c" && cell.fg == TOKYO_NIGHT_TEXT));
+    }
 
     #[test]
     fn confirmation_ui_leaves_the_title_to_herdr() {
