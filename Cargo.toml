@@ -1,6 +1,6 @@
 [package]
 name = "herdr-worktree"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Herdr plugin for creating and switching to Git worktrees"
 license = "MIT"

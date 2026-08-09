@@ -65,4 +65,4 @@ Release Please maintains a release PR from conventional commits on `main`:
 - A `!` after the type/scope or a `BREAKING CHANGE:` footer creates a major release.
 - Other commit types do not create a release.
 
-Merging the release PR updates the Cargo, plugin, and README versions, creates the tag, and publishes the GitHub release.
+Merging the release PR updates the Cargo and plugin versions, creates the tag, and publishes the GitHub release.
