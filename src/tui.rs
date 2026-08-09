@@ -14,7 +14,7 @@ use ratatui::{
 use std::io::{self, stdout};
 
 use crate::config::Config;
-use crate::wt::{BranchEntry, EntryKind};
+use crate::wt::{BranchEntry, EntryKind, RemovalSafety};
 
 #[derive(Debug, Clone)]
 pub enum TuiResult {
@@ -353,14 +353,14 @@ fn draw(f: &mut Frame, app: &mut App) {
 }
 
 /// Run confirm remove TUI - returns true if confirmed, false if cancelled
-pub fn run_confirm_tui(statusline: &str) -> io::Result<bool> {
+pub fn run_confirm_tui(statusline: &str, safety: &RemovalSafety) -> io::Result<bool> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_confirm_dialog(&mut terminal, statusline);
+    let result = run_confirm_dialog(&mut terminal, statusline, safety);
 
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
@@ -368,16 +368,20 @@ pub fn run_confirm_tui(statusline: &str) -> io::Result<bool> {
     result
 }
 
-fn run_confirm_dialog(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, statusline: &str) -> io::Result<bool> {
+fn run_confirm_dialog(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    statusline: &str,
+    safety: &RemovalSafety,
+) -> io::Result<bool> {
     let mut confirmed = false;
 
     loop {
-        terminal.draw(|f| draw_confirm_ui(f, statusline))?;
+        terminal.draw(|f| draw_confirm_ui(f, statusline, safety))?;
 
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    KeyCode::Char('y') | KeyCode::Char('Y') if safety.allows_removal() => {
                         confirmed = true;
                         break;
                     }
@@ -393,7 +397,7 @@ fn run_confirm_dialog(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, sta
     Ok(confirmed)
 }
 
-fn draw_confirm_ui(frame: &mut Frame, statusline: &str) {
+fn draw_confirm_ui(frame: &mut Frame, statusline: &str, safety: &RemovalSafety) {
     let size = frame.area();
 
     // Vertically center content with flexible spacing
@@ -402,6 +406,7 @@ fn draw_confirm_ui(frame: &mut Frame, statusline: &str) {
         .constraints([
             Constraint::Fill(1),      // flexible space above
             Constraint::Length(1),    // statusline
+            Constraint::Length(1),    // safety status
             Constraint::Length(1),    // spacer
             Constraint::Length(1),    // buttons
             Constraint::Fill(1),      // flexible space below
@@ -414,13 +419,48 @@ fn draw_confirm_ui(frame: &mut Frame, statusline: &str) {
         .wrap(Wrap { trim: true });
     frame.render_widget(status_para, layout[1]);
 
+    let (message, color) = match safety {
+        RemovalSafety::Safe => (
+            "Safe to remove: worktree and branch will be deleted.",
+            Color::Green,
+        ),
+        RemovalSafety::Dirty => (
+            "Cannot remove: worktree has uncommitted changes.",
+            Color::Red,
+        ),
+        RemovalSafety::BranchCheckedOutElsewhere => (
+            "Safe to remove: worktree will be deleted; branch is checked out elsewhere.",
+            Color::Yellow,
+        ),
+        RemovalSafety::BranchNotIntegrated => (
+            "Safe to remove: worktree will be deleted; branch changes are not integrated.",
+            Color::Yellow,
+        ),
+        RemovalSafety::Unknown => (
+            "Cannot verify safe removal. Worktrunk status is unavailable.",
+            Color::Yellow,
+        ),
+    };
+    let safety_para = Paragraph::new(Span::styled(message, Style::default().fg(color)))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(safety_para, layout[2]);
+
     // Buttons
-    let buttons = Paragraph::new(Line::from(vec![
-        Span::styled("[y]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::raw(" Remove    "),
-        Span::styled("[n/Esc]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        Span::raw(" Cancel"),
-    ]))
+    let buttons = if safety.allows_removal() {
+        Line::from(vec![
+            Span::styled("[y]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(" Remove    "),
+            Span::styled("[n/Esc]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw(" Cancel"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("[Esc]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw(" Cancel"),
+        ])
+    };
+    let buttons = Paragraph::new(buttons)
     .alignment(Alignment::Center);
     frame.render_widget(buttons, layout[3]);
 }
@@ -511,7 +551,9 @@ mod tests {
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        terminal.draw(|frame| draw_confirm_ui(frame, "repo: branch")).unwrap();
+        terminal
+            .draw(|frame| draw_confirm_ui(frame, "repo: branch", &RemovalSafety::Safe))
+            .unwrap();
 
         let buffer = terminal.backend().buffer();
         let rendered = (0..buffer.area.height)
@@ -524,7 +566,33 @@ mod tests {
             .join("\n");
 
         assert!(rendered.contains("repo: branch"));
+        assert!(rendered.contains("Safe to remove"));
         assert!(rendered.contains("[y] Remove"));
         assert!(!rendered.contains("Remove worktree?"));
+    }
+
+    #[test]
+    fn unintegrated_confirmation_ui_keeps_the_branch() {
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw_confirm_ui(frame, "repo: branch", &RemovalSafety::BranchNotIntegrated)
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.get(x, y).symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("worktree will be deleted; branch changes are not integrated"));
+        assert!(rendered.contains("[y] Remove"));
     }
 }

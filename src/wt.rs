@@ -107,6 +107,89 @@ pub fn wt_list(
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemovalSafety {
+    Safe,
+    Dirty,
+    BranchCheckedOutElsewhere,
+    BranchNotIntegrated,
+    Unknown,
+}
+
+impl RemovalSafety {
+    pub fn allows_removal(&self) -> bool {
+        matches!(
+            self,
+            Self::Safe | Self::BranchCheckedOutElsewhere | Self::BranchNotIntegrated
+        )
+    }
+
+    pub fn as_env_value(&self) -> &'static str {
+        match self {
+            Self::Safe => "safe",
+            Self::Dirty => "dirty",
+            Self::BranchCheckedOutElsewhere => "branch-checked-out-elsewhere",
+            Self::BranchNotIntegrated => "branch-not-integrated",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_env_value(value: &str) -> Option<Self> {
+        match value {
+            "safe" => Some(Self::Safe),
+            "dirty" => Some(Self::Dirty),
+            "branch-checked-out-elsewhere" => Some(Self::BranchCheckedOutElsewhere),
+            "branch-not-integrated" => Some(Self::BranchNotIntegrated),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+pub fn removal_safety(list: &Value, checkout_path: &str) -> RemovalSafety {
+    let Some(item) = list
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.pointer("/worktree/path").and_then(Value::as_str) == Some(checkout_path)
+            })
+        })
+    else {
+        return RemovalSafety::Unknown;
+    };
+
+    let Some(worktree) = item.get("worktree") else {
+        return RemovalSafety::Unknown;
+    };
+
+    let dirty = ["staged", "modified", "untracked", "renamed", "deleted", "conflicted"]
+        .iter()
+        .any(|key| {
+            worktree
+                .pointer(&format!("/changes/{key}"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+    if dirty {
+        return RemovalSafety::Dirty;
+    }
+
+    if worktree
+        .get("duplicate_branch")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return RemovalSafety::BranchCheckedOutElsewhere;
+    }
+
+    match item.pointer("/display/state").and_then(Value::as_str) {
+        Some("empty") | Some("integrated") => RemovalSafety::Safe,
+        Some(_) => RemovalSafety::BranchNotIntegrated,
+        None => RemovalSafety::Unknown,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BranchEntry {
     pub kind: EntryKind,
@@ -230,5 +313,70 @@ mod tests {
 
         assert!(error.contains("Worktrunk (wt) exited"));
         assert!(error.contains("cargo install worktrunk"));
+    }
+
+    #[test]
+    fn removal_safety_requires_a_clean_integrated_worktree() {
+        let list = serde_json::json!({
+            "items": [{
+                "worktree": {
+                    "path": "/repo.feature",
+                    "changes": {"modified": false},
+                    "duplicate_branch": false
+                },
+                "display": {"state": "integrated"}
+            }]
+        });
+
+        assert_eq!(removal_safety(&list, "/repo.feature"), RemovalSafety::Safe);
+    }
+
+    #[test]
+    fn removal_safety_rejects_dirty_and_unmerged_worktrees() {
+        let dirty = serde_json::json!({
+            "items": [{
+                "worktree": {"path": "/repo.feature", "changes": {"untracked": true}},
+                "display": {"state": "integrated"}
+            }]
+        });
+        let unmerged = serde_json::json!({
+            "items": [{
+                "worktree": {"path": "/repo.feature", "changes": {}},
+                "display": {"state": "ahead"}
+            }]
+        });
+
+        assert_eq!(removal_safety(&dirty, "/repo.feature"), RemovalSafety::Dirty);
+        assert_eq!(
+            removal_safety(&unmerged, "/repo.feature"),
+            RemovalSafety::BranchNotIntegrated
+        );
+    }
+
+    #[test]
+    fn removal_safety_rejects_a_branch_checked_out_elsewhere() {
+        let list = serde_json::json!({
+            "items": [{
+                "worktree": {
+                    "path": "/repo.feature",
+                    "changes": {},
+                    "duplicate_branch": true
+                },
+                "display": {"state": "integrated"}
+            }]
+        });
+
+        assert_eq!(
+            removal_safety(&list, "/repo.feature"),
+            RemovalSafety::BranchCheckedOutElsewhere
+        );
+    }
+
+    #[test]
+    fn clean_unintegrated_worktrees_can_be_removed_without_deleting_the_branch() {
+        assert!(RemovalSafety::BranchNotIntegrated.allows_removal());
+        assert!(RemovalSafety::BranchCheckedOutElsewhere.allows_removal());
+        assert!(!RemovalSafety::Dirty.allows_removal());
+        assert!(!RemovalSafety::Unknown.allows_removal());
     }
 }

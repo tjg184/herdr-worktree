@@ -23,8 +23,8 @@ use herdr::{
 use serde_json::Value;
 use tui::TuiResult;
 use wt::{
-    ensure_available as ensure_worktrunk_available, wt_list, wt_remove, wt_switch, BranchEntry,
-    EntryKind,
+    ensure_available as ensure_worktrunk_available, removal_safety, wt_list, wt_remove, wt_switch,
+    BranchEntry, EntryKind, RemovalSafety,
 };
 
 extern crate libc;
@@ -122,6 +122,9 @@ fn remove_action() {
 
     // Build display string: repo_name: branch
     let display_text = format!("{}: {}", repo_name, branch);
+    let removal_safety = wt_list(&repo_root, false, false)
+        .map(|list| removal_safety(&list, &checkout_path))
+        .unwrap_or(RemovalSafety::Unknown);
 
     // Check if confirm dialog is already open using global lock file with PID check
     let lock_file = "/tmp/herdr-worktree-confirm.lock";
@@ -150,6 +153,7 @@ fn remove_action() {
         ("HERDR_REMOVE_REPO_NAME", repo_name.as_str()),
         ("HERDR_REMOVE_BRANCH", branch.as_str()),
         ("HERDR_REMOVE_DISPLAY_TEXT", display_text.as_str()),
+        ("HERDR_REMOVE_SAFETY", removal_safety.as_env_value()),
     ];
     if let Err(e) = open_confirm_remove_pane(&plugin_id, &env_vars) {
         // Clean up lock file on error
@@ -413,6 +417,10 @@ fn confirm_remove_ui() {
     let repo_name = env::var("HERDR_REMOVE_REPO_NAME").expect("HERDR_REMOVE_REPO_NAME not set");
     let display_text =
         env::var("HERDR_REMOVE_DISPLAY_TEXT").expect("HERDR_REMOVE_DISPLAY_TEXT not set");
+    let removal_safety = env::var("HERDR_REMOVE_SAFETY")
+        .ok()
+        .and_then(|value| RemovalSafety::from_env_value(&value))
+        .unwrap_or(RemovalSafety::Unknown);
 
     // Write lock file with our PID
     let lock_file = "/tmp/herdr-worktree-confirm.lock";
@@ -421,7 +429,7 @@ fn confirm_remove_ui() {
     }
 
     // Run confirm dialog TUI inline
-    let confirmed = tui::run_confirm_tui(&display_text).unwrap_or(false);
+    let confirmed = tui::run_confirm_tui(&display_text, &removal_safety).unwrap_or(false);
 
     if confirmed {
         // Remove the worktree
