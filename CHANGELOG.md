@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1](https://github.com/tjg184/herdr-worktree/compare/v1.1.0...v1.1.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* change remote key to control+r ([a1d9db7](https://github.com/tjg184/herdr-worktree/commit/a1d9db7191edfd2d978f2bdffc0ae415a3123d4c))
+* lower herdr requirement ([d7400a4](https://github.com/tjg184/herdr-worktree/commit/d7400a43b1cce4e6e2663fcb56b31b7073ded5e8))
+
 ## [1.1.0](https://github.com/tjg184/herdr-worktree/compare/v1.0.0...v1.1.0) (2026-08-09)
 
 
