@@ -316,37 +316,23 @@ fn run_ui() {
         Err(error) => show_error_and_exit(&format!("Failed to inspect HEAD: {error}"), 1),
     };
 
-    // Reload only when the visibility setting changes; refreshes are handled in the TUI.
-    let mut show_remotes = false;
-    loop {
-        let entries = match load_entries(&repo_root, show_remotes, config.backend) {
-            Ok(e) => e,
-            Err(e) => {
-                show_error_and_exit(&format!("Failed to list worktrees: {}", e), 1);
-            }
-        };
+    // Always load entries with remotes included; visibility toggled in TUI
+    let entries = match load_entries(&repo_root, true, config.backend) {
+        Ok(e) => e,
+        Err(e) => {
+            show_error_and_exit(&format!("Failed to list worktrees: {}", e), 1);
+        }
+    };
 
-        match tui::run_tui(
-            repo_root.clone(),
-            config.clone(),
-            entries,
-            show_remotes,
-            head,
-        ) {
-            Ok(TuiResult::Cancelled) => break,
-            Ok(TuiResult::Created) => {
-                if let Some(id) = pane_id.as_deref() {
-                    let _ = close_plugin_pane(id);
-                }
-                break;
+    match tui::run_tui(repo_root, config, entries, head) {
+        Ok(TuiResult::Cancelled) => {}
+        Ok(TuiResult::Created) => {
+            if let Some(id) = pane_id.as_deref() {
+                let _ = close_plugin_pane(id);
             }
-            Ok(TuiResult::ToggleRemotes) => {
-                show_remotes = !show_remotes;
-                continue;
-            }
-            Err(e) => {
-                show_error_and_exit(&format!("TUI error: {}", e), 1);
-            }
+        }
+        Err(e) => {
+            show_error_and_exit(&format!("TUI error: {}", e), 1);
         }
     }
 

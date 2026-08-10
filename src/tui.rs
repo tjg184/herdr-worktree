@@ -29,7 +29,6 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum TuiResult {
     Cancelled,
-    ToggleRemotes,
     Created,
 }
 
@@ -96,13 +95,7 @@ struct App {
 }
 
 impl App {
-    fn new(
-        config: Config,
-        repo_root: String,
-        entries: Vec<BranchEntry>,
-        show_remotes: bool,
-        head: HeadState,
-    ) -> Self {
+    fn new(config: Config, repo_root: String, entries: Vec<BranchEntry>, head: HeadState) -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         let mut app = Self {
@@ -110,7 +103,7 @@ impl App {
             filtered: Vec::new(),
             filter: String::new(),
             list_state,
-            show_remotes,
+            show_remotes: false,
             config,
             repo_root,
             head,
@@ -132,7 +125,17 @@ impl App {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| entry.reference().to_lowercase().contains(&query))
+            .filter(|(_, entry)| {
+                // Hide remote branches when show_remotes is false
+                if !self.show_remotes && matches!(entry.kind, EntryKind::BranchRemote) {
+                    return false;
+                }
+                // Hide main branch worktree (redundant with other entries)
+                if matches!(entry.kind, EntryKind::WorktreeMain) {
+                    return false;
+                }
+                entry.reference().to_lowercase().contains(&query)
+            })
             .map(|(index, _)| index)
             .collect();
         self.list_state.select(Some(0));
@@ -427,7 +430,6 @@ pub fn run_tui(
     repo_root: String,
     config: Config,
     entries: Vec<BranchEntry>,
-    show_remotes: bool,
     head: HeadState,
 ) -> io::Result<TuiResult> {
     enable_raw_mode()?;
@@ -435,7 +437,7 @@ pub fn run_tui(
     execute!(output, EnterAlternateScreen)?;
     let terminal_backend = CrosstermBackend::new(output);
     let mut terminal = Terminal::new(terminal_backend)?;
-    let mut app = App::new(config, repo_root, entries, show_remotes, head);
+    let mut app = App::new(config, repo_root, entries, head);
     let result = loop {
         terminal.draw(|frame| draw(frame, &mut app))?;
         if let Some(result) = app.poll_tasks() {
@@ -478,15 +480,15 @@ pub fn run_tui(
             }
             continue;
         }
-        if app.config.keybindings.toggle_remotes.matches(key)
-            && matches!(app.state, AppState::Picking)
-        {
-            break TuiResult::ToggleRemotes;
-        }
+        // ctrl+r toggles remotes and fetches them
         if app.config.keybindings.refresh.matches(key)
             && matches!(app.state, AppState::Picking | AppState::SelectingBase)
         {
-            app.start_fetch();
+            app.show_remotes = !app.show_remotes;
+            app.apply_filter();
+            if app.show_remotes {
+                app.start_fetch();
+            }
             continue;
         }
         match app.state.clone() {
@@ -677,15 +679,21 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let (title, text) = match &app.state {
         AppState::Picking => (
             format!(
-                "Filter ({} remotes, {} refresh, {} cancel)",
-                app.config.keybindings.toggle_remotes.display(),
+                "Filter ({} remotes, {} cancel)",
                 app.config.keybindings.refresh.display(),
                 app.config.keybindings.cancel.display()
             ),
             app.filter.clone(),
         ),
         AppState::NewIntent { .. } => ("Create worktree".into(), "Choose a starting point".into()),
-        AppState::SelectingBase => ("Select base branch".into(), app.filter.clone()),
+        AppState::SelectingBase => (
+            format!(
+                "Select base branch ({} remotes, {} cancel)",
+                app.config.keybindings.refresh.display(),
+                app.config.keybindings.cancel.display()
+            ),
+            app.filter.clone(),
+        ),
         AppState::Naming {
             input,
             base,
@@ -1029,13 +1037,7 @@ mod tests {
 
     #[test]
     fn restoring_new_intent_keeps_state_and_highlight_in_sync() {
-        let mut app = App::new(
-            Config::default(),
-            "/repo".into(),
-            Vec::new(),
-            false,
-            HeadState::Branch,
-        );
+        let mut app = App::new(Config::default(), "/repo".into(), Vec::new(), HeadState::Branch);
 
         app.show_new_intent(1);
 
@@ -1051,13 +1053,7 @@ mod tests {
     #[test]
     fn failed_creation_restores_name_and_base() {
         let base = branch("main");
-        let mut app = App::new(
-            Config::default(),
-            ".".into(),
-            vec![base.clone()],
-            false,
-            HeadState::Branch,
-        );
+        let mut app = App::new(Config::default(), ".".into(), vec![base.clone()], HeadState::Branch);
         let resume = AppState::Naming {
             input: "feature/new".into(),
             base: Some(base),
