@@ -1,6 +1,6 @@
 id = "herdr-worktree"
 name = "Herdr Worktree"
-version = "1.1.0"
+version = "1.1.1"
 min_herdr_version = "0.7.0"
 description = "Interactive picker for creating and switching to Git worktrees in Herdr"
 platforms = ["macos", "linux"]
