@@ -159,6 +159,18 @@ pub fn worktree_remove(workspace_id: &str) -> Result<(), String> {
     }
 }
 
+pub fn git_delete_branch(repo_root: &str, branch: &str) -> Result<(), String> {
+    let out = Command::new("git")
+        .args(["-C", repo_root, "branch", "-d", branch])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(command_error(&out))
+    }
+}
+
 fn command_error(out: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);

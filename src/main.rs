@@ -16,8 +16,8 @@ use crossterm::{
 use git::{get_primary_worktree, head_state, resolve_repo_root};
 use herdr::{
     close_plugin_pane, focus_plugin_pane, get_focused_workspace_id, get_own_pane_id_from_env,
-    get_plugin_pane_id, herdr_json, open_confirm_remove_pane, show_notification, workspace_close,
-    worktree_remove,
+    get_plugin_pane_id, git_delete_branch, herdr_json, open_confirm_remove_pane, show_notification,
+    workspace_close, worktree_remove,
 };
 use serde_json::Value;
 use tui::TuiResult;
@@ -25,6 +25,9 @@ use wt::{
     ensure_available as ensure_worktrunk_available, removal_safety, wt_list, wt_remove,
     BranchEntry, RemovalSafety,
 };
+
+// Also import ConfirmAction for the confirm-remove action
+use tui::ConfirmAction;
 
 extern crate libc;
 
@@ -369,36 +372,56 @@ fn confirm_remove_ui() {
     }
 
     // Run confirm dialog TUI inline
-    let confirmed = tui::run_confirm_tui(&display_text, &removal_safety, backend).unwrap_or(false);
+    let action = tui::run_confirm_tui(&display_text, &removal_safety, backend)
+        .unwrap_or(ConfirmAction::Cancel);
 
-    if confirmed {
-        // Remove the worktree
-        let result = match backend {
-            WorktreeBackend::Worktrunk => wt_remove(&repo_root, &checkout_path).map(|value| {
-                value
-                    .get("branch")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("<unknown>")
-                    .to_string()
-            }),
-            WorktreeBackend::Native => worktree_remove(&workspace_id)
-                .map(|_| env::var("HERDR_REMOVE_BRANCH").unwrap_or_else(|_| "<unknown>".into())),
-        };
-        match result {
-            Ok(removed_branch) => {
-                let notification_body = format!("{}: {}", repo_name, removed_branch);
-
-                // Close the workspace
-                if backend == WorktreeBackend::Worktrunk {
-                    let _ = workspace_close(&workspace_id);
+    match action {
+        ConfirmAction::Remove => {
+            // Remove the worktree
+            let result = match backend {
+                WorktreeBackend::Worktrunk => wt_remove(&repo_root, &checkout_path).map(|value| {
+                    value
+                        .get("branch")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("<unknown>")
+                        .to_string()
+                }),
+                WorktreeBackend::Native => {
+                    worktree_remove(&workspace_id).map(|_| {
+                        env::var("HERDR_REMOVE_BRANCH").unwrap_or_else(|_| "<unknown>".into())
+                    })
                 }
+            };
+            match result {
+                Ok(removed_branch) => {
+                    // On Native + Safe, also delete the branch (worktrunk handles this itself)
+                    if backend == WorktreeBackend::Native
+                        && removal_safety == RemovalSafety::Safe
+                    {
+                        let _ = git_delete_branch(&repo_root, &removed_branch);
+                    }
 
-                // Show success notification
-                let _ = show_notification("Worktree removed", &notification_body);
+                    let notification_body = format!("{}: {}", repo_name, removed_branch);
+
+                    // Close the workspace
+                    if backend == WorktreeBackend::Worktrunk {
+                        let _ = workspace_close(&workspace_id);
+                    }
+
+                    // Show success notification
+                    let _ = show_notification("Worktree removed", &notification_body);
+                }
+                Err(e) => {
+                    let _ = show_notification("Failed to remove worktree", &e);
+                }
             }
-            Err(e) => {
-                let _ = show_notification("Failed to remove worktree", &e);
-            }
+        }
+        ConfirmAction::CloseWorkspace => {
+            // Close the workspace without removing anything
+            let _ = workspace_close(&workspace_id);
+        }
+        ConfirmAction::Cancel => {
+            // Do nothing - just close the pane
         }
     }
 

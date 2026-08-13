@@ -32,6 +32,13 @@ pub enum TuiResult {
     Created,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfirmAction {
+    Remove,
+    CloseWorkspace,
+    Cancel,
+}
+
 #[derive(Debug, Clone)]
 enum AppState {
     Picking,
@@ -922,7 +929,7 @@ pub fn run_confirm_tui(
     statusline: &str,
     safety: &RemovalSafety,
     backend: WorktreeBackend,
-) -> io::Result<bool> {
+) -> io::Result<ConfirmAction> {
     enable_raw_mode()?;
     let mut output = stdout();
     execute!(output, EnterAlternateScreen)?;
@@ -934,9 +941,12 @@ pub fn run_confirm_tui(
             if key.kind == KeyEventKind::Press {
                 match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') if safety.allows_removal() => {
-                        break true
+                        break ConfirmAction::Remove
                     }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => break false,
+                    KeyCode::Char('c') | KeyCode::Char('C') => break ConfirmAction::CloseWorkspace,
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        break ConfirmAction::Cancel
+                    }
                     _ => {}
                 }
             }
@@ -951,7 +961,7 @@ fn draw_confirm_ui(
     frame: &mut Frame,
     statusline: &str,
     safety: &RemovalSafety,
-    backend: WorktreeBackend,
+    _backend: WorktreeBackend,
 ) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -970,26 +980,20 @@ fn draw_confirm_ui(
         layout[1],
     );
     let (message, color) = match safety {
-        RemovalSafety::Safe => match backend {
-            WorktreeBackend::Worktrunk => (
-                "Safe to remove: worktree and branch will be deleted.",
-                Color::Green,
-            ),
-            WorktreeBackend::Native => (
-                "Safe to remove: worktree will be removed; branch will be kept.",
-                Color::Green,
-            ),
-        },
+        RemovalSafety::Safe => (
+            "Safe: worktree and branch will be permanently deleted.",
+            Color::Green,
+        ),
         RemovalSafety::Dirty => (
             "Cannot remove: worktree has uncommitted changes.",
             Color::Red,
         ),
         RemovalSafety::BranchCheckedOutElsewhere => (
-            "Safe to remove: branch is checked out elsewhere.",
+            "Branch is checked out in another worktree and will be kept. Only this worktree will be removed.",
             Color::Yellow,
         ),
         RemovalSafety::BranchNotIntegrated => (
-            "Safe to remove: branch changes are not integrated.",
+            "Warning: branch has unmerged changes. Worktree will be removed; branch will be kept.",
             Color::Yellow,
         ),
         RemovalSafety::Unknown => ("Cannot verify safe removal.", Color::Yellow),
@@ -1002,9 +1006,9 @@ fn draw_confirm_ui(
     );
     frame.render_widget(
         Paragraph::new(if safety.allows_removal() {
-            "[y] Remove    [n/Esc] Cancel"
+            "[y] Remove    [c] Close workspace    [n/Esc] Cancel"
         } else {
-            "[Esc] Cancel"
+            "[c] Close workspace    [Esc] Cancel"
         })
         .alignment(Alignment::Center),
         layout[3],
