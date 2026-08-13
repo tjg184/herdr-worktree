@@ -316,8 +316,8 @@ fn run_ui() {
         Err(error) => show_error_and_exit(&format!("Failed to inspect HEAD: {error}"), 1),
     };
 
-    // Always load entries with remotes included; visibility toggled in TUI
-    let entries = match load_entries(&repo_root, true, config.backend) {
+    // Load local branches immediately; remotes load in background
+    let entries = match load_entries(&repo_root, false, config.backend) {
         Ok(e) => e,
         Err(e) => {
             show_error_and_exit(&format!("Failed to list worktrees: {}", e), 1);

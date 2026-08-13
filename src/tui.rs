@@ -90,6 +90,7 @@ struct App {
     status: Option<String>,
     error: Option<String>,
     fetch: Option<Receiver<Result<Vec<BranchEntry>, String>>>,
+    remote_load: Option<Receiver<Result<Vec<BranchEntry>, String>>>,
     create: Option<Receiver<Result<(), String>>>,
     resume_state: Option<AppState>,
 }
@@ -114,8 +115,10 @@ impl App {
             fetch: None,
             create: None,
             resume_state: None,
+            remote_load: None,
         };
         app.apply_filter();
+        app.start_remote_load();
         app
     }
 
@@ -142,6 +145,40 @@ impl App {
     }
 
     fn poll_tasks(&mut self) -> Option<TuiResult> {
+        // Check remote_load completion before fetch to avoid race condition
+        if let Some(result) = self
+            .remote_load
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.remote_load = None;
+            match result {
+                Ok(entries) => {
+                    // Preserve selection by remembering the current branch reference
+                    let selected_ref = self
+                        .list_state
+                        .selected()
+                        .and_then(|idx| self.filtered.get(idx))
+                        .map(|&entry_idx| self.entries[entry_idx].reference());
+                    self.entries = entries;
+                    self.apply_filter();
+                    // Restore selection if the same branch still exists
+                    if let Some(ref_str) = selected_ref {
+                        if let Some(pos) = self.filtered.iter().position(|&i| {
+                            self.entries[i].reference() == ref_str
+                        }) {
+                            self.list_state.select(Some(pos));
+                        }
+                    }
+                    self.status = None;
+                    self.error = None;
+                }
+                Err(error) => {
+                    self.status = None;
+                    self.error = Some(error);
+                }
+            }
+        }
         if let Some(result) = self
             .fetch
             .as_ref()
@@ -241,6 +278,27 @@ impl App {
         });
         self.fetch = Some(receiver);
         self.status = Some("Fetching all remotes...".into());
+        self.error = None;
+    }
+
+    fn start_remote_load(&mut self) {
+        if self.remote_load.is_some() {
+            return;
+        }
+        let repo_root = self.repo_root.clone();
+        let backend = self.config.backend;
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = match backend {
+                WorktreeBackend::Worktrunk => {
+                    wt::wt_list(&repo_root, true, true).map(|json| wt::parse_wt_list(&json))
+                }
+                WorktreeBackend::Native => git::native_entries(&repo_root, true),
+            };
+            let _ = sender.send(result);
+        });
+        self.remote_load = Some(receiver);
+        self.status = Some("Loading remote branches...".into());
         self.error = None;
     }
 
