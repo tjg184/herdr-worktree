@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2](https://github.com/tjg184/herdr-worktree/compare/v1.1.1...v1.1.2) (2026-08-13)
+
+
+### Bug Fixes
+
+* load remotes async ([0504cbb](https://github.com/tjg184/herdr-worktree/commit/0504cbb49d38003f197f5c5cd9f5a8c28a21a773))
+* remove messages and able to just close workspace ([ca84f74](https://github.com/tjg184/herdr-worktree/commit/ca84f7452164a6b191cce69c861be9b49b45c45b))
+
 ## [1.1.1](https://github.com/tjg184/herdr-worktree/compare/v1.1.0...v1.1.1) (2026-08-10)
 
 
