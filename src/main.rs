@@ -71,14 +71,54 @@ fn ensure_worktrunk_or_exit() {
 }
 
 /// Return the workspace that should receive focus after `closing_workspace_id` is closed.
-/// Picks the workspace with the next-lower number (wrapping to the highest if at #1),
-/// excluding the workspace being closed. Returns None if there is only one workspace.
+///
+/// Primary heuristic: if the closing workspace is a linked worktree, return the workspace
+/// with the same `repo_key` whose `is_linked_worktree` is false — i.e., the main checkout
+/// the user opened this worktree from.
+///
+/// Fallback: return the workspace with the next-lower number (wrapping to the highest),
+/// excluding the workspace being closed.
 fn pick_return_workspace(snapshot: &Value, closing_workspace_id: &str) -> Option<String> {
     let workspaces = snapshot
         .pointer("/result/snapshot/workspaces")
         .and_then(|v| v.as_array())?;
 
-    // Collect (number, workspace_id) pairs, sorted by number ascending
+    // Find the workspace being closed
+    let closing = workspaces
+        .iter()
+        .find(|w| w.get("workspace_id").and_then(|v| v.as_str()) == Some(closing_workspace_id))?;
+
+    // Primary: if this is a linked worktree, find the main checkout for the same repo
+    let is_linked = closing
+        .pointer("/worktree/is_linked_worktree")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if is_linked {
+        let repo_key = closing
+            .pointer("/worktree/repo_key")
+            .and_then(|v| v.as_str());
+
+        if let Some(key) = repo_key {
+            let main_workspace = workspaces.iter().find(|w| {
+                w.get("workspace_id").and_then(|v| v.as_str()) != Some(closing_workspace_id)
+                    && w.pointer("/worktree/repo_key").and_then(|v| v.as_str()) == Some(key)
+                    && !w
+                        .pointer("/worktree/is_linked_worktree")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true)
+            });
+
+            if let Some(ws) = main_workspace {
+                return ws
+                    .get("workspace_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+        }
+    }
+
+    // Fallback: previous by workspace number
     let mut ordered: Vec<(u64, &str)> = workspaces
         .iter()
         .filter_map(|w| {
@@ -97,7 +137,6 @@ fn pick_return_workspace(snapshot: &Value, closing_workspace_id: &str) -> Option
         .iter()
         .position(|(_, id)| *id == closing_workspace_id)?;
 
-    // Prefer the workspace immediately before; wrap to last if at position 0
     let target_pos = if pos == 0 {
         ordered.len() - 1
     } else {
@@ -498,40 +537,82 @@ mod tests {
     use crate::wt::EntryKind;
     use serde_json::json;
 
-    fn make_snapshot(workspaces: &[(&str, u64)]) -> Value {
-        let list: Vec<Value> = workspaces
-            .iter()
-            .map(|(id, num)| json!({"workspace_id": id, "number": num}))
-            .collect();
-        json!({"result": {"snapshot": {"workspaces": list}}})
+    fn make_snapshot(workspaces: Vec<Value>) -> Value {
+        json!({"result": {"snapshot": {"workspaces": workspaces}}})
+    }
+
+    fn plain_workspace(id: &str, number: u64) -> Value {
+        json!({"workspace_id": id, "number": number})
+    }
+
+    fn main_worktree_workspace(id: &str, number: u64, repo_key: &str) -> Value {
+        json!({
+            "workspace_id": id,
+            "number": number,
+            "worktree": {"repo_key": repo_key, "is_linked_worktree": false}
+        })
+    }
+
+    fn linked_worktree_workspace(id: &str, number: u64, repo_key: &str) -> Value {
+        json!({
+            "workspace_id": id,
+            "number": number,
+            "worktree": {"repo_key": repo_key, "is_linked_worktree": true}
+        })
     }
 
     #[test]
-    fn pick_return_workspace_prefers_previous_by_number() {
-        let snap = make_snapshot(&[("w1", 1), ("w2", 2), ("w3", 3)]);
+    fn pick_return_workspace_prefers_main_checkout_over_number_order() {
+        // github-actions (#14, main) → herdr-worktree (#15, unrelated) → PLAT-824 (#16, linked)
+        let snap = make_snapshot(vec![
+            main_worktree_workspace("wHN", 14, "/repo/github-actions/.git"),
+            plain_workspace("wHP", 15),
+            linked_worktree_workspace("wJ1", 16, "/repo/github-actions/.git"),
+        ]);
+        // Closing wJ1 should return wHN (main checkout), not wHP (previous by number)
         assert_eq!(
-            pick_return_workspace(&snap, "w3"),
-            Some("w2".to_string())
+            pick_return_workspace(&snap, "wJ1"),
+            Some("wHN".to_string())
         );
-        assert_eq!(
-            pick_return_workspace(&snap, "w2"),
-            Some("w1".to_string())
-        );
+    }
+
+    #[test]
+    fn pick_return_workspace_falls_back_to_previous_by_number() {
+        // Plain workspaces with no worktree metadata
+        let snap = make_snapshot(vec![
+            plain_workspace("w1", 1),
+            plain_workspace("w2", 2),
+            plain_workspace("w3", 3),
+        ]);
+        assert_eq!(pick_return_workspace(&snap, "w3"), Some("w2".to_string()));
+        assert_eq!(pick_return_workspace(&snap, "w2"), Some("w1".to_string()));
     }
 
     #[test]
     fn pick_return_workspace_wraps_from_first_to_last() {
-        let snap = make_snapshot(&[("w1", 1), ("w2", 2), ("w3", 3)]);
-        assert_eq!(
-            pick_return_workspace(&snap, "w1"),
-            Some("w3".to_string())
-        );
+        let snap = make_snapshot(vec![
+            plain_workspace("w1", 1),
+            plain_workspace("w2", 2),
+            plain_workspace("w3", 3),
+        ]);
+        assert_eq!(pick_return_workspace(&snap, "w1"), Some("w3".to_string()));
     }
 
     #[test]
     fn pick_return_workspace_returns_none_for_single_workspace() {
-        let snap = make_snapshot(&[("w1", 1)]);
+        let snap = make_snapshot(vec![plain_workspace("w1", 1)]);
         assert_eq!(pick_return_workspace(&snap, "w1"), None);
+    }
+
+    #[test]
+    fn pick_return_workspace_ignores_main_checkout_without_matching_repo_key() {
+        // Two repos; linked worktree should not jump to unrelated main checkout
+        let snap = make_snapshot(vec![
+            main_worktree_workspace("wA", 1, "/repo/alpha/.git"),
+            main_worktree_workspace("wB", 2, "/repo/beta/.git"),
+            linked_worktree_workspace("wC", 3, "/repo/beta/.git"),
+        ]);
+        assert_eq!(pick_return_workspace(&snap, "wC"), Some("wB".to_string()));
     }
 
     #[test]
