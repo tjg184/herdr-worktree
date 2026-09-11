@@ -19,7 +19,7 @@ use git::{get_primary_worktree, head_state, resolve_repo_root};
 use herdr::{
     close_plugin_pane, focus_plugin_pane, get_focused_workspace_id, get_own_pane_id_from_env,
     get_plugin_pane_id, git_delete_branch, herdr_json, open_confirm_remove_pane, show_notification,
-    workspace_close, worktree_remove,
+    workspace_close, workspace_focus, worktree_remove,
 };
 use serde_json::Value;
 use tui::TuiResult;
@@ -68,6 +68,43 @@ fn ensure_worktrunk_or_exit() {
         let _ = show_notification("Worktrunk unavailable", &error);
         show_error_and_exit(&error, 1);
     }
+}
+
+/// Return the workspace that should receive focus after `closing_workspace_id` is closed.
+/// Picks the workspace with the next-lower number (wrapping to the highest if at #1),
+/// excluding the workspace being closed. Returns None if there is only one workspace.
+fn pick_return_workspace(snapshot: &Value, closing_workspace_id: &str) -> Option<String> {
+    let workspaces = snapshot
+        .pointer("/result/snapshot/workspaces")
+        .and_then(|v| v.as_array())?;
+
+    // Collect (number, workspace_id) pairs, sorted by number ascending
+    let mut ordered: Vec<(u64, &str)> = workspaces
+        .iter()
+        .filter_map(|w| {
+            let number = w.get("number")?.as_u64()?;
+            let id = w.get("workspace_id")?.as_str()?;
+            Some((number, id))
+        })
+        .collect();
+    ordered.sort_by_key(|(n, _)| *n);
+
+    if ordered.len() <= 1 {
+        return None;
+    }
+
+    let pos = ordered
+        .iter()
+        .position(|(_, id)| *id == closing_workspace_id)?;
+
+    // Prefer the workspace immediately before; wrap to last if at position 0
+    let target_pos = if pos == 0 {
+        ordered.len() - 1
+    } else {
+        pos - 1
+    };
+
+    Some(ordered[target_pos].1.to_string())
 }
 
 fn remove_action() {
@@ -155,6 +192,9 @@ fn remove_action() {
 
     let plugin_id = env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| "herdr-worktree".to_string());
 
+    let return_workspace_id =
+        pick_return_workspace(&snapshot, &workspace_id).unwrap_or_default();
+
     // Open confirm-remove pane
     let env_vars = [
         ("HERDR_REMOVE_WORKSPACE_ID", workspace_id.as_str()),
@@ -164,6 +204,7 @@ fn remove_action() {
         ("HERDR_REMOVE_BRANCH", branch.as_str()),
         ("HERDR_REMOVE_DISPLAY_TEXT", display_text.as_str()),
         ("HERDR_REMOVE_SAFETY", removal_safety.as_env_value()),
+        ("HERDR_REMOVE_RETURN_WORKSPACE_ID", return_workspace_id.as_str()),
         (
             "HERDR_REMOVE_BACKEND",
             match config.backend {
@@ -368,6 +409,9 @@ fn confirm_remove_ui() {
         .ok()
         .and_then(|value| RemovalSafety::from_env_value(&value))
         .unwrap_or(RemovalSafety::Unknown);
+    let return_workspace_id = env::var("HERDR_REMOVE_RETURN_WORKSPACE_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     // Write lock file with our PID
     let lock_file = "/tmp/herdr-worktree-confirm.lock";
@@ -412,6 +456,11 @@ fn confirm_remove_ui() {
                         let _ = workspace_close(&workspace_id);
                     }
 
+                    // Return focus to the workspace that was active before this one
+                    if let Some(ref return_id) = return_workspace_id {
+                        let _ = workspace_focus(return_id);
+                    }
+
                     // Show success notification
                     let _ = show_notification("Worktree removed", &notification_body);
                 }
@@ -423,6 +472,9 @@ fn confirm_remove_ui() {
         ConfirmAction::CloseWorkspace => {
             // Close the workspace without removing anything
             let _ = workspace_close(&workspace_id);
+            if let Some(ref return_id) = return_workspace_id {
+                let _ = workspace_focus(return_id);
+            }
         }
         ConfirmAction::Cancel => {
             // Do nothing - just close the pane
@@ -445,6 +497,42 @@ mod tests {
     use super::*;
     use crate::wt::EntryKind;
     use serde_json::json;
+
+    fn make_snapshot(workspaces: &[(&str, u64)]) -> Value {
+        let list: Vec<Value> = workspaces
+            .iter()
+            .map(|(id, num)| json!({"workspace_id": id, "number": num}))
+            .collect();
+        json!({"result": {"snapshot": {"workspaces": list}}})
+    }
+
+    #[test]
+    fn pick_return_workspace_prefers_previous_by_number() {
+        let snap = make_snapshot(&[("w1", 1), ("w2", 2), ("w3", 3)]);
+        assert_eq!(
+            pick_return_workspace(&snap, "w3"),
+            Some("w2".to_string())
+        );
+        assert_eq!(
+            pick_return_workspace(&snap, "w2"),
+            Some("w1".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_return_workspace_wraps_from_first_to_last() {
+        let snap = make_snapshot(&[("w1", 1), ("w2", 2), ("w3", 3)]);
+        assert_eq!(
+            pick_return_workspace(&snap, "w1"),
+            Some("w3".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_return_workspace_returns_none_for_single_workspace() {
+        let snap = make_snapshot(&[("w1", 1)]);
+        assert_eq!(pick_return_workspace(&snap, "w1"), None);
+    }
 
     #[test]
     fn loading_remotes_uses_one_combined_list_without_duplicate_worktrees() {

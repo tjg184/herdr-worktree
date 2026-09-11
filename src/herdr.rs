@@ -106,6 +106,10 @@ pub fn workspace_close(workspace_id: &str) -> Result<(), String> {
     run_herdr(["workspace", "close", workspace_id])
 }
 
+pub fn workspace_focus(workspace_id: &str) -> Result<(), String> {
+    run_herdr(["workspace", "focus", workspace_id])
+}
+
 pub fn show_notification(title: &str, body: &str) -> Result<(), String> {
     run_herdr(["notification", "show", title, "--body", body])
 }
