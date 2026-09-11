@@ -490,14 +490,15 @@ fn confirm_remove_ui() {
 
                     let notification_body = format!("{}: {}", repo_name, removed_branch);
 
-                    // Close the workspace
-                    if backend == WorktreeBackend::Worktrunk {
-                        let _ = workspace_close(&workspace_id);
-                    }
-
-                    // Return focus to the workspace that was active before this one
+                    // Focus the return workspace before closing — workspace_close kills
+                    // the pane this process runs in, so focus must come first.
                     if let Some(ref return_id) = return_workspace_id {
                         let _ = workspace_focus(return_id);
+                    }
+
+                    // Close the workspace (may terminate this process)
+                    if backend == WorktreeBackend::Worktrunk {
+                        let _ = workspace_close(&workspace_id);
                     }
 
                     // Show success notification
@@ -509,11 +510,11 @@ fn confirm_remove_ui() {
             }
         }
         ConfirmAction::CloseWorkspace => {
-            // Close the workspace without removing anything
-            let _ = workspace_close(&workspace_id);
+            // Focus before close — close kills this process
             if let Some(ref return_id) = return_workspace_id {
                 let _ = workspace_focus(return_id);
             }
+            let _ = workspace_close(&workspace_id);
         }
         ConfirmAction::Cancel => {
             // Do nothing - just close the pane
