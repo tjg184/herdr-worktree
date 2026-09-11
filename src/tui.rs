@@ -544,10 +544,7 @@ pub fn run_tui(
         let Event::Key(key) = event::read()? else {
             continue;
         };
-        if key.kind != KeyEventKind::Press
-            || matches!(app.state, AppState::Creating)
-            || app.initial_load.is_some()
-        {
+        if key.kind != KeyEventKind::Press || matches!(app.state, AppState::Creating) {
             continue;
         }
         if app.config.keybindings.cancel.matches(key) {
@@ -835,12 +832,6 @@ fn draw(frame: &mut Frame, app: &mut App) {
         );
     }
     let items = match &app.state {
-        AppState::Picking if app.initial_load.is_some() => {
-            vec![ListItem::new(Span::styled(
-                "Loading...",
-                Style::default().fg(TEXT),
-            ))]
-        }
         AppState::Picking => {
             let mut rows = vec![ListItem::new(Span::styled(
                 "+ new     New worktree...",
@@ -889,10 +880,16 @@ fn draw(frame: &mut Frame, app: &mut App) {
         AppState::NewIntent { .. } => "↑/↓ select   ↵ continue   Esc back",
         _ => "",
     };
+    let loading = if app.initial_load.is_some() {
+        "Loading branches..."
+    } else {
+        ""
+    };
     let message = app
         .error
         .as_deref()
         .or(app.status.as_deref())
+        .or(if loading.is_empty() { None } else { Some(loading) })
         .unwrap_or(controls);
     frame.render_widget(
         Paragraph::new(message).style(Style::default().fg(if app.error.is_some() {
