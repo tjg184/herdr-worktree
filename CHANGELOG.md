@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.2.0](https://github.com/tjg184/herdr-worktree/compare/v1.1.2...v1.2.0) (2026-09-11)
+
+
+### Features
+
+* **tui:** show new worktree action immediately while branch list loads ([6790111](https://github.com/tjg184/herdr-worktree/commit/6790111a1387c0fd8a9c023c801cdf4126ebdd6a))
+
+
+### Bug Fixes
+
+* **remove:** focus previous workspace after unloading worktree ([75c4bc8](https://github.com/tjg184/herdr-worktree/commit/75c4bc89c256367bc9627ab5ea58ee3cd8c04db8))
+* **remove:** focus return workspace before closing to avoid process termination ([b988cb1](https://github.com/tjg184/herdr-worktree/commit/b988cb19834b33d9bc61fb957a9acc2b56ed8b9e))
+* **remove:** return to main checkout workspace using repo_key match ([b0009ca](https://github.com/tjg184/herdr-worktree/commit/b0009ca8439c3afd70766327bf2c1c3fd734dc4e))
+
+
+### Performance Improvements
+
+* **tui:** load branch list in background to eliminate startup blank screen ([86510ac](https://github.com/tjg184/herdr-worktree/commit/86510ac7d641d1852650c7c57a7d40d6230c4506))
+
 ## [1.1.2](https://github.com/tjg184/herdr-worktree/compare/v1.1.1...v1.1.2) (2026-08-13)
 
 
