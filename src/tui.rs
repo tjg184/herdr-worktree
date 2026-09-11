@@ -97,17 +97,26 @@ struct App {
     status: Option<String>,
     error: Option<String>,
     fetch: Option<Receiver<Result<Vec<BranchEntry>, String>>>,
+    /// Receives the initial local-branch list loaded in the background at startup.
+    /// While Some, the TUI shows a loading indicator. On receipt, transitions to
+    /// the normal Picking state and kicks off the remote load.
+    initial_load: Option<Receiver<Result<Vec<BranchEntry>, String>>>,
     remote_load: Option<Receiver<Result<Vec<BranchEntry>, String>>>,
     create: Option<Receiver<Result<(), String>>>,
     resume_state: Option<AppState>,
 }
 
 impl App {
-    fn new(config: Config, repo_root: String, entries: Vec<BranchEntry>, head: HeadState) -> Self {
+    fn new(
+        config: Config,
+        repo_root: String,
+        head: HeadState,
+        initial_load: Receiver<Result<Vec<BranchEntry>, String>>,
+    ) -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         let mut app = Self {
-            entries,
+            entries: Vec::new(),
             filtered: Vec::new(),
             filter: String::new(),
             list_state,
@@ -122,10 +131,11 @@ impl App {
             fetch: None,
             create: None,
             resume_state: None,
+            initial_load: Some(initial_load),
             remote_load: None,
         };
         app.apply_filter();
-        app.start_remote_load();
+        // start_remote_load() is called after initial_load resolves in poll_tasks()
         app
     }
 
@@ -152,6 +162,26 @@ impl App {
     }
 
     fn poll_tasks(&mut self) -> Option<TuiResult> {
+        // Receive the initial local-branch list loaded in background at startup
+        if let Some(result) = self
+            .initial_load
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.initial_load = None;
+            match result {
+                Ok(entries) => {
+                    self.entries = entries;
+                    self.apply_filter();
+                    self.error = None;
+                }
+                Err(error) => {
+                    self.error = Some(error);
+                }
+            }
+            // Now that we have local branches, kick off the remote enrichment pass
+            self.start_remote_load();
+        }
         // Check remote_load completion before fetch to avoid race condition
         if let Some(result) = self
             .remote_load
@@ -494,7 +524,7 @@ fn remote_target(entry: &BranchEntry, entries: &[BranchEntry]) -> Result<Option<
 pub fn run_tui(
     repo_root: String,
     config: Config,
-    entries: Vec<BranchEntry>,
+    initial_load: mpsc::Receiver<Result<Vec<BranchEntry>, String>>,
     head: HeadState,
 ) -> io::Result<TuiResult> {
     enable_raw_mode()?;
@@ -502,7 +532,7 @@ pub fn run_tui(
     execute!(output, EnterAlternateScreen)?;
     let terminal_backend = CrosstermBackend::new(output);
     let mut terminal = Terminal::new(terminal_backend)?;
-    let mut app = App::new(config, repo_root, entries, head);
+    let mut app = App::new(config, repo_root, head, initial_load);
     let result = loop {
         terminal.draw(|frame| draw(frame, &mut app))?;
         if let Some(result) = app.poll_tasks() {
@@ -514,7 +544,10 @@ pub fn run_tui(
         let Event::Key(key) = event::read()? else {
             continue;
         };
-        if key.kind != KeyEventKind::Press || matches!(app.state, AppState::Creating) {
+        if key.kind != KeyEventKind::Press
+            || matches!(app.state, AppState::Creating)
+            || app.initial_load.is_some()
+        {
             continue;
         }
         if app.config.keybindings.cancel.matches(key) {
@@ -802,6 +835,12 @@ fn draw(frame: &mut Frame, app: &mut App) {
         );
     }
     let items = match &app.state {
+        AppState::Picking if app.initial_load.is_some() => {
+            vec![ListItem::new(Span::styled(
+                "Loading...",
+                Style::default().fg(TEXT),
+            ))]
+        }
         AppState::Picking => {
             let mut rows = vec![ListItem::new(Span::styled(
                 "+ new     New worktree...",
@@ -1099,7 +1138,9 @@ mod tests {
 
     #[test]
     fn restoring_new_intent_keeps_state_and_highlight_in_sync() {
-        let mut app = App::new(Config::default(), "/repo".into(), Vec::new(), HeadState::Branch);
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Ok(Vec::new())).unwrap();
+        let mut app = App::new(Config::default(), "/repo".into(), HeadState::Branch, receiver);
 
         app.show_new_intent(1);
 
@@ -1115,7 +1156,11 @@ mod tests {
     #[test]
     fn failed_creation_restores_name_and_base() {
         let base = branch("main");
-        let mut app = App::new(Config::default(), ".".into(), vec![base.clone()], HeadState::Branch);
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Ok(vec![base.clone()])).unwrap();
+        let mut app = App::new(Config::default(), ".".into(), HeadState::Branch, receiver);
+        // Drain initial_load so poll_tasks() sees a fully-loaded state
+        app.poll_tasks();
         let resume = AppState::Naming {
             input: "feature/new".into(),
             base: Some(base),

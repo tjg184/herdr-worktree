@@ -1,5 +1,7 @@
 use std::env;
 use std::process;
+use std::sync::mpsc;
+use std::thread;
 
 mod config;
 mod git;
@@ -319,15 +321,17 @@ fn run_ui() {
         Err(error) => show_error_and_exit(&format!("Failed to inspect HEAD: {error}"), 1),
     };
 
-    // Load local branches immediately; remotes load in background
-    let entries = match load_entries(&repo_root, false, config.backend) {
-        Ok(e) => e,
-        Err(e) => {
-            show_error_and_exit(&format!("Failed to list worktrees: {}", e), 1);
-        }
-    };
+    // Spawn initial list load in background so TUI can render immediately
+    let (initial_sender, initial_receiver) = mpsc::channel();
+    {
+        let repo_root = repo_root.clone();
+        let backend = config.backend;
+        thread::spawn(move || {
+            let _ = initial_sender.send(load_entries(&repo_root, false, backend));
+        });
+    }
 
-    match tui::run_tui(repo_root, config, entries, head) {
+    match tui::run_tui(repo_root, config, initial_receiver, head) {
         Ok(TuiResult::Cancelled) => {}
         Ok(TuiResult::Created) => {
             if let Some(id) = pane_id.as_deref() {
