@@ -139,27 +139,6 @@ impl RemovalSafety {
             Self::Safe | Self::BranchCheckedOutElsewhere | Self::BranchNotIntegrated
         )
     }
-
-    pub fn as_env_value(&self) -> &'static str {
-        match self {
-            Self::Safe => "safe",
-            Self::Dirty => "dirty",
-            Self::BranchCheckedOutElsewhere => "branch-checked-out-elsewhere",
-            Self::BranchNotIntegrated => "branch-not-integrated",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    pub fn from_env_value(value: &str) -> Option<Self> {
-        match value {
-            "safe" => Some(Self::Safe),
-            "dirty" => Some(Self::Dirty),
-            "branch-checked-out-elsewhere" => Some(Self::BranchCheckedOutElsewhere),
-            "branch-not-integrated" => Some(Self::BranchNotIntegrated),
-            "unknown" => Some(Self::Unknown),
-            _ => None,
-        }
-    }
 }
 
 pub fn removal_safety(list: &Value, checkout_path: &str) -> RemovalSafety {

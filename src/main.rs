@@ -205,12 +205,6 @@ fn remove_action() {
 
     // Build display string: repo_name: branch
     let display_text = format!("{}: {}", repo_name, branch);
-    let removal_safety = match config.backend {
-        WorktreeBackend::Worktrunk => wt_list(&repo_root, false, false)
-            .map(|list| removal_safety(&list, &checkout_path))
-            .unwrap_or(RemovalSafety::Unknown),
-        WorktreeBackend::Native => git::native_removal_safety(&checkout_path),
-    };
 
     // Check if confirm dialog is already open using global lock file with PID check
     let lock_file = "/tmp/herdr-worktree-confirm.lock";
@@ -242,7 +236,6 @@ fn remove_action() {
         ("HERDR_REMOVE_REPO_NAME", repo_name.as_str()),
         ("HERDR_REMOVE_BRANCH", branch.as_str()),
         ("HERDR_REMOVE_DISPLAY_TEXT", display_text.as_str()),
-        ("HERDR_REMOVE_SAFETY", removal_safety.as_env_value()),
         ("HERDR_REMOVE_RETURN_WORKSPACE_ID", return_workspace_id.as_str()),
         (
             "HERDR_REMOVE_BACKEND",
@@ -444,10 +437,6 @@ fn confirm_remove_ui() {
     let repo_name = env::var("HERDR_REMOVE_REPO_NAME").expect("HERDR_REMOVE_REPO_NAME not set");
     let display_text =
         env::var("HERDR_REMOVE_DISPLAY_TEXT").expect("HERDR_REMOVE_DISPLAY_TEXT not set");
-    let removal_safety = env::var("HERDR_REMOVE_SAFETY")
-        .ok()
-        .and_then(|value| RemovalSafety::from_env_value(&value))
-        .unwrap_or(RemovalSafety::Unknown);
     let return_workspace_id = env::var("HERDR_REMOVE_RETURN_WORKSPACE_ID")
         .ok()
         .filter(|s| !s.is_empty());
@@ -459,11 +448,26 @@ fn confirm_remove_ui() {
     }
 
     // Run confirm dialog TUI inline
-    let action = tui::run_confirm_tui(&display_text, &removal_safety, backend)
+    let (safety_sender, safety_receiver) = std::sync::mpsc::channel();
+    {
+        let repo_root = repo_root.clone();
+        let checkout_path = checkout_path.clone();
+        std::thread::spawn(move || {
+            let safety = match backend {
+                WorktreeBackend::Worktrunk => wt_list(&repo_root, false, false)
+                    .map(|list| removal_safety(&list, &checkout_path))
+                    .unwrap_or(RemovalSafety::Unknown),
+                WorktreeBackend::Native => git::native_removal_safety(&checkout_path),
+            };
+            let _ = safety_sender.send(safety);
+        });
+    }
+
+    let action = tui::run_confirm_tui(&display_text, safety_receiver, backend)
         .unwrap_or(ConfirmAction::Cancel);
 
     match action {
-        ConfirmAction::Remove => {
+        ConfirmAction::Remove(removal_safety) => {
             // Remove the worktree
             let result = match backend {
                 WorktreeBackend::Worktrunk => wt_remove(&repo_root, &checkout_path).map(|value| {

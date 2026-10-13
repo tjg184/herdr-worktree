@@ -34,7 +34,7 @@ pub enum TuiResult {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmAction {
-    Remove,
+    Remove(RemovalSafety),
     CloseWorkspace,
     Cancel,
 }
@@ -961,9 +961,28 @@ fn render_entry(entry: &BranchEntry) -> ListItem<'static> {
     ]))
 }
 
+fn confirm_key_action(code: KeyCode, safety: Option<&RemovalSafety>) -> Option<ConfirmAction> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => safety
+            .filter(|safety| safety.allows_removal())
+            .map(|safety| ConfirmAction::Remove(safety.clone())),
+        KeyCode::Char('c') | KeyCode::Char('C') => Some(ConfirmAction::CloseWorkspace),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(ConfirmAction::Cancel),
+        _ => None,
+    }
+}
+
+fn poll_removal_safety(receiver: &Receiver<RemovalSafety>) -> Option<RemovalSafety> {
+    match receiver.try_recv() {
+        Ok(safety) => Some(safety),
+        Err(mpsc::TryRecvError::Empty) => None,
+        Err(mpsc::TryRecvError::Disconnected) => Some(RemovalSafety::Unknown),
+    }
+}
+
 pub fn run_confirm_tui(
     statusline: &str,
-    safety: &RemovalSafety,
+    safety_receiver: Receiver<RemovalSafety>,
     backend: WorktreeBackend,
 ) -> io::Result<ConfirmAction> {
     enable_raw_mode()?;
@@ -971,19 +990,18 @@ pub fn run_confirm_tui(
     execute!(output, EnterAlternateScreen)?;
     let terminal_backend = CrosstermBackend::new(output);
     let mut terminal = Terminal::new(terminal_backend)?;
+    let mut safety: Option<RemovalSafety> = None;
     let result = loop {
-        terminal.draw(|frame| draw_confirm_ui(frame, statusline, safety, backend))?;
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') if safety.allows_removal() => {
-                        break ConfirmAction::Remove
+        if safety.is_none() {
+            safety = poll_removal_safety(&safety_receiver);
+        }
+        terminal.draw(|frame| draw_confirm_ui(frame, statusline, safety.as_ref(), backend))?;
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    if let Some(action) = confirm_key_action(key.code, safety.as_ref()) {
+                        break action;
                     }
-                    KeyCode::Char('c') | KeyCode::Char('C') => break ConfirmAction::CloseWorkspace,
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                        break ConfirmAction::Cancel
-                    }
-                    _ => {}
                 }
             }
         }
@@ -996,7 +1014,7 @@ pub fn run_confirm_tui(
 fn draw_confirm_ui(
     frame: &mut Frame,
     statusline: &str,
-    safety: &RemovalSafety,
+    safety: Option<&RemovalSafety>,
     _backend: WorktreeBackend,
 ) {
     let layout = Layout::default()
@@ -1016,23 +1034,24 @@ fn draw_confirm_ui(
         layout[1],
     );
     let (message, color) = match safety {
-        RemovalSafety::Safe => (
+        None => ("Checking whether removal is safe…", Color::DarkGray),
+        Some(RemovalSafety::Safe) => (
             "Safe: worktree and branch will be permanently deleted.",
             Color::Green,
         ),
-        RemovalSafety::Dirty => (
+        Some(RemovalSafety::Dirty) => (
             "Cannot remove: worktree has uncommitted changes.",
             Color::Red,
         ),
-        RemovalSafety::BranchCheckedOutElsewhere => (
+        Some(RemovalSafety::BranchCheckedOutElsewhere) => (
             "Branch is checked out in another worktree and will be kept. Only this worktree will be removed.",
             Color::Yellow,
         ),
-        RemovalSafety::BranchNotIntegrated => (
+        Some(RemovalSafety::BranchNotIntegrated) => (
             "Warning: branch has unmerged changes. Worktree will be removed; branch will be kept.",
             Color::Yellow,
         ),
-        RemovalSafety::Unknown => ("Cannot verify safe removal.", Color::Yellow),
+        Some(RemovalSafety::Unknown) => ("Cannot verify safe removal.", Color::Yellow),
     };
     frame.render_widget(
         Paragraph::new(message)
@@ -1041,7 +1060,7 @@ fn draw_confirm_ui(
         layout[2],
     );
     frame.render_widget(
-        Paragraph::new(if safety.allows_removal() {
+        Paragraph::new(if safety.is_some_and(RemovalSafety::allows_removal) {
             "[y] Remove    [c] Close workspace    [n/Esc] Cancel"
         } else {
             "[c] Close workspace    [Esc] Cancel"
@@ -1065,6 +1084,54 @@ mod tests {
             upstream: None,
         }
     }
+    #[test]
+    fn removal_is_blocked_until_safety_is_known() {
+        assert_eq!(confirm_key_action(KeyCode::Char('y'), None), None);
+        assert_eq!(
+            confirm_key_action(KeyCode::Char('y'), Some(&RemovalSafety::Safe)),
+            Some(ConfirmAction::Remove(RemovalSafety::Safe))
+        );
+    }
+
+    #[test]
+    fn removal_is_blocked_for_unsafe_states() {
+        assert_eq!(
+            confirm_key_action(KeyCode::Char('y'), Some(&RemovalSafety::Dirty)),
+            None
+        );
+        assert_eq!(
+            confirm_key_action(KeyCode::Char('y'), Some(&RemovalSafety::Unknown)),
+            None
+        );
+    }
+
+    #[test]
+    fn cancel_and_close_work_while_safety_is_pending() {
+        assert_eq!(
+            confirm_key_action(KeyCode::Esc, None),
+            Some(ConfirmAction::Cancel)
+        );
+        assert_eq!(
+            confirm_key_action(KeyCode::Char('c'), None),
+            Some(ConfirmAction::CloseWorkspace)
+        );
+    }
+
+    #[test]
+    fn safety_poll_waits_then_reports_result() {
+        let (sender, receiver) = mpsc::channel();
+        assert_eq!(poll_removal_safety(&receiver), None);
+        sender.send(RemovalSafety::Safe).unwrap();
+        assert_eq!(poll_removal_safety(&receiver), Some(RemovalSafety::Safe));
+    }
+
+    #[test]
+    fn safety_poll_treats_dead_checker_as_unknown() {
+        let (sender, receiver) = mpsc::channel::<RemovalSafety>();
+        drop(sender);
+        assert_eq!(poll_removal_safety(&receiver), Some(RemovalSafety::Unknown));
+    }
+
     #[test]
     fn remote_collision_requires_rename() {
         let remote = BranchEntry {
