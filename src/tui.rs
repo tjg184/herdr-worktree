@@ -980,43 +980,61 @@ fn poll_removal_safety(receiver: &Receiver<RemovalSafety>) -> Option<RemovalSafe
     }
 }
 
+enum ConfirmationSafety {
+    Checking(Receiver<RemovalSafety>),
+    Checked(RemovalSafety),
+}
+
+impl ConfirmationSafety {
+    fn poll(&mut self) {
+        if let Self::Checking(receiver) = self {
+            if let Some(safety) = poll_removal_safety(receiver) {
+                *self = Self::Checked(safety);
+            }
+        }
+    }
+
+    fn safety(&self) -> Option<&RemovalSafety> {
+        match self {
+            Self::Checking(_) => None,
+            Self::Checked(safety) => Some(safety),
+        }
+    }
+
+    fn action(&self, key: KeyCode) -> Option<ConfirmAction> {
+        confirm_key_action(key, self.safety())
+    }
+}
+
 pub fn run_confirm_tui(
     statusline: &str,
-    safety_receiver: Receiver<RemovalSafety>,
-    backend: WorktreeBackend,
+    receiver: Receiver<RemovalSafety>,
 ) -> io::Result<ConfirmAction> {
     enable_raw_mode()?;
     let mut output = stdout();
     execute!(output, EnterAlternateScreen)?;
     let terminal_backend = CrosstermBackend::new(output);
     let mut terminal = Terminal::new(terminal_backend)?;
-    let mut safety: Option<RemovalSafety> = None;
-    let result = loop {
-        if safety.is_none() {
-            safety = poll_removal_safety(&safety_receiver);
-        }
-        terminal.draw(|frame| draw_confirm_ui(frame, statusline, safety.as_ref(), backend))?;
+    let mut state = ConfirmationSafety::Checking(receiver);
+    let result = (|| loop {
+        state.poll();
+        terminal.draw(|frame| draw_confirm_ui(frame, statusline, state.safety()))?;
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    if let Some(action) = confirm_key_action(key.code, safety.as_ref()) {
-                        break action;
+                    if let Some(action) = state.action(key.code) {
+                        return Ok(action);
                     }
                 }
             }
         }
-    };
+    })();
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
-    Ok(result)
+    result
 }
 
-fn draw_confirm_ui(
-    frame: &mut Frame,
-    statusline: &str,
-    safety: Option<&RemovalSafety>,
-    _backend: WorktreeBackend,
-) {
+fn draw_confirm_ui(frame: &mut Frame, statusline: &str, safety: Option<&RemovalSafety>) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1034,7 +1052,7 @@ fn draw_confirm_ui(
         layout[1],
     );
     let (message, color) = match safety {
-        None => ("Checking whether removal is safe…", Color::DarkGray),
+        None => ("Checking safety…", Color::Yellow),
         Some(RemovalSafety::Safe) => (
             "Safe: worktree and branch will be permanently deleted.",
             Color::Green,
@@ -1073,6 +1091,76 @@ fn draw_confirm_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_safety_renders_loading_and_allows_cancel_but_not_removal() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = ConfirmationSafety::Checking(receiver);
+        state.poll();
+        let backend = ratatui::backend::TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_confirm_ui(frame, "example: feature", state.safety()))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Checking safety…"));
+        assert!(!text.contains("[y] Remove"));
+        assert_eq!(state.action(KeyCode::Char('y')), None);
+        assert_eq!(state.action(KeyCode::Char('Y')), None);
+        assert_eq!(state.action(KeyCode::Esc), Some(ConfirmAction::Cancel));
+        assert_eq!(
+            state.action(KeyCode::Char('c')),
+            Some(ConfirmAction::CloseWorkspace)
+        );
+
+        sender.send(RemovalSafety::Safe).unwrap();
+        state.poll();
+        assert_eq!(state.safety(), Some(&RemovalSafety::Safe));
+        assert_eq!(
+            state.action(KeyCode::Char('y')),
+            Some(ConfirmAction::Remove(RemovalSafety::Safe))
+        );
+    }
+
+    #[test]
+    fn completed_safety_only_enables_removal_for_permitted_states() {
+        for safety in [
+            RemovalSafety::Safe,
+            RemovalSafety::Dirty,
+            RemovalSafety::BranchCheckedOutElsewhere,
+            RemovalSafety::BranchNotIntegrated,
+            RemovalSafety::Unknown,
+        ] {
+            let (sender, receiver) = mpsc::channel();
+            sender.send(safety.clone()).unwrap();
+            let mut state = ConfirmationSafety::Checking(receiver);
+            state.poll();
+            assert_eq!(state.safety(), Some(&safety));
+            assert_eq!(
+                state.action(KeyCode::Char('y')),
+                safety
+                    .allows_removal()
+                    .then_some(ConfirmAction::Remove(safety.clone()))
+            );
+        }
+    }
+
+    #[test]
+    fn failed_safety_worker_disables_removal_without_blocking_cancel() {
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let mut state = ConfirmationSafety::Checking(receiver);
+        state.poll();
+        assert_eq!(state.safety(), Some(&RemovalSafety::Unknown));
+        assert_eq!(state.action(KeyCode::Char('y')), None);
+        assert_eq!(state.action(KeyCode::Esc), Some(ConfirmAction::Cancel));
+    }
 
     fn branch(name: &str) -> BranchEntry {
         BranchEntry {

@@ -171,7 +171,7 @@ fn remove_action() {
 
     // Get CWD and worktree info for the focused workspace
     let (checkout_path, repo_name, branch) =
-        match get_workspace_info_from_snapshot(&snapshot, &workspace_id, config.backend) {
+        match get_workspace_info_from_snapshot(&snapshot, &workspace_id) {
             Ok(info) => info,
             Err(error) => {
                 let _ = show_notification("Failed to get workspace worktree info", &error);
@@ -225,8 +225,7 @@ fn remove_action() {
 
     let plugin_id = env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| "herdr-worktree".to_string());
 
-    let return_workspace_id =
-        pick_return_workspace(&snapshot, &workspace_id).unwrap_or_default();
+    let return_workspace_id = pick_return_workspace(&snapshot, &workspace_id).unwrap_or_default();
 
     // Open confirm-remove pane
     let env_vars = [
@@ -236,7 +235,10 @@ fn remove_action() {
         ("HERDR_REMOVE_REPO_NAME", repo_name.as_str()),
         ("HERDR_REMOVE_BRANCH", branch.as_str()),
         ("HERDR_REMOVE_DISPLAY_TEXT", display_text.as_str()),
-        ("HERDR_REMOVE_RETURN_WORKSPACE_ID", return_workspace_id.as_str()),
+        (
+            "HERDR_REMOVE_RETURN_WORKSPACE_ID",
+            return_workspace_id.as_str(),
+        ),
         (
             "HERDR_REMOVE_BACKEND",
             match config.backend {
@@ -257,7 +259,6 @@ fn remove_action() {
 fn get_workspace_info_from_snapshot(
     snapshot: &Value,
     workspace_id: &str,
-    backend: WorktreeBackend,
 ) -> Result<(String, String, String), String> {
     // Get worktree info: (checkout_path, repo_name, branch)
     let workspaces = snapshot
@@ -283,23 +284,21 @@ fn get_workspace_info_from_snapshot(
         .ok_or("Focused workspace has no repository name")?
         .to_string();
 
-    // Get branch from worktree list
-    let repo_root = worktree
-        .get("repo_root")
-        .and_then(|value| value.as_str())
-        .ok_or("Focused workspace has no repository root")?;
-    let entries = match backend {
-        WorktreeBackend::Worktrunk => {
-            wt_list(repo_root, true, false).map(|json| wt::parse_wt_list(&json))?
-        }
-        WorktreeBackend::Native => git::native_entries(repo_root, false)?,
-    };
-
-    let branch = entries
-        .iter()
-        .find(|e| e.path.as_deref() == Some(&checkout_path))
-        .map(|e| e.branch.clone())
-        .ok_or("Could not determine the worktree branch")?;
+    let output = process::Command::new("git")
+        .args([
+            "-C",
+            &checkout_path,
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "HEAD",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err("Could not determine the worktree branch".into());
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     Ok((checkout_path, repo_name, branch))
 }
@@ -424,10 +423,6 @@ fn confirm_remove_ui() {
         Ok("native") => WorktreeBackend::Native,
         _ => WorktreeBackend::Worktrunk,
     };
-    if backend == WorktreeBackend::Worktrunk {
-        ensure_worktrunk_or_exit();
-    }
-
     // Read env vars passed from remove_action
     let workspace_id =
         env::var("HERDR_REMOVE_WORKSPACE_ID").expect("HERDR_REMOVE_WORKSPACE_ID not set");
@@ -447,24 +442,21 @@ fn confirm_remove_ui() {
         show_error_and_exit(&format!("Failed to create lock file: {}", e), 1);
     }
 
-    // Run confirm dialog TUI inline
-    let (safety_sender, safety_receiver) = std::sync::mpsc::channel();
+    let (sender, receiver) = mpsc::channel();
     {
         let repo_root = repo_root.clone();
         let checkout_path = checkout_path.clone();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             let safety = match backend {
                 WorktreeBackend::Worktrunk => wt_list(&repo_root, false, false)
                     .map(|list| removal_safety(&list, &checkout_path))
                     .unwrap_or(RemovalSafety::Unknown),
                 WorktreeBackend::Native => git::native_removal_safety(&checkout_path),
             };
-            let _ = safety_sender.send(safety);
+            let _ = sender.send(safety);
         });
     }
-
-    let action = tui::run_confirm_tui(&display_text, safety_receiver, backend)
-        .unwrap_or(ConfirmAction::Cancel);
+    let action = tui::run_confirm_tui(&display_text, receiver).unwrap_or(ConfirmAction::Cancel);
 
     match action {
         ConfirmAction::Remove(removal_safety) => {
