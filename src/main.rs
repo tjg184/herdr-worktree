@@ -25,7 +25,7 @@ use serde_json::Value;
 use tui::TuiResult;
 use wt::{
     ensure_available as ensure_worktrunk_available, removal_safety, wt_list, wt_remove,
-    BranchEntry, RemovalSafety,
+    wt_statusline, BranchEntry, RemovalSafety,
 };
 
 // Also import ConfirmAction for the confirm-remove action
@@ -444,11 +444,10 @@ fn confirm_remove_ui() {
 
     let (sender, receiver) = mpsc::channel();
     {
-        let repo_root = repo_root.clone();
         let checkout_path = checkout_path.clone();
         thread::spawn(move || {
             let safety = match backend {
-                WorktreeBackend::Worktrunk => wt_list(&repo_root, false, false)
+                WorktreeBackend::Worktrunk => wt_statusline(&checkout_path)
                     .map(|list| removal_safety(&list, &checkout_path))
                     .unwrap_or(RemovalSafety::Unknown),
                 WorktreeBackend::Native => git::native_removal_safety(&checkout_path),

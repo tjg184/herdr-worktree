@@ -132,6 +132,29 @@ pub enum RemovalSafety {
     Unknown,
 }
 
+pub fn wt_statusline(checkout_path: &str) -> Result<Value, String> {
+    wt_statusline_with(&mut Command::new("wt"), checkout_path)
+}
+
+fn wt_statusline_with(command: &mut Command, checkout_path: &str) -> Result<Value, String> {
+    let out = command
+        .args([
+            "list",
+            "statusline",
+            "--format=json",
+            "--config-set",
+            "list.json-schema=2",
+            "-C",
+            checkout_path,
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    serde_json::from_slice(&out.stdout).map_err(|error| error.to_string())
+}
+
 impl RemovalSafety {
     pub fn allows_removal(&self) -> bool {
         matches!(
@@ -300,6 +323,95 @@ pub fn parse_wt_list(json: &Value) -> Vec<BranchEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_only_status_preserves_removal_safety_without_listing_other_worktrees() {
+        for (state, changes, duplicate, expected) in [
+            ("empty", serde_json::json!({}), false, RemovalSafety::Safe),
+            (
+                "integrated",
+                serde_json::json!({}),
+                false,
+                RemovalSafety::Safe,
+            ),
+            (
+                "ahead",
+                serde_json::json!({}),
+                false,
+                RemovalSafety::BranchNotIntegrated,
+            ),
+            (
+                "integrated",
+                serde_json::json!({}),
+                true,
+                RemovalSafety::BranchCheckedOutElsewhere,
+            ),
+            (
+                "integrated",
+                serde_json::json!({"untracked": true}),
+                false,
+                RemovalSafety::Dirty,
+            ),
+            (
+                "integrated",
+                serde_json::json!({"staged": true}),
+                false,
+                RemovalSafety::Dirty,
+            ),
+            (
+                "integrated",
+                serde_json::json!({"modified": true}),
+                false,
+                RemovalSafety::Dirty,
+            ),
+            (
+                "integrated",
+                serde_json::json!({"conflicted": true}),
+                false,
+                RemovalSafety::Dirty,
+            ),
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let checkout = fixture.path().join("selected worktree");
+            let checkout = checkout.to_str().unwrap();
+            let payload = serde_json::json!({"schema": 2, "items": [{
+                "worktree": {"path": checkout, "changes": changes, "duplicate_branch": duplicate},
+                "display": {"state": state}
+            }]});
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                r#"
+                [ "$#" -eq 7 ] &&
+                [ "$1" = list ] && [ "$2" = statusline ] &&
+                [ "$3" = --format=json ] && [ "$4" = --config-set ] &&
+                [ "$5" = list.json-schema=2 ] && [ "$6" = -C ] &&
+                [ "$7" = "$CHECKOUT" ] || { echo 'unexpected full-repository query' >&2; exit 1; }
+                printf '%s' "$PAYLOAD"
+            "#,
+                "wt",
+            ]);
+            command
+                .env("CHECKOUT", checkout)
+                .env("PAYLOAD", payload.to_string());
+
+            let result = wt_statusline_with(&mut command, checkout).unwrap();
+            assert_eq!(removal_safety(&result, checkout), expected);
+            assert_eq!(
+                removal_safety(&result, "/unrelated"),
+                RemovalSafety::Unknown
+            );
+        }
+    }
+
+    #[test]
+    fn target_only_status_rejects_failed_commands_and_invalid_json() {
+        for script in ["echo status-failed >&2; exit 1", "printf 'not-json'"] {
+            let mut command = Command::new("sh");
+            command.args(["-c", script, "wt"]);
+            assert!(wt_statusline_with(&mut command, "/repo.feature").is_err());
+        }
+    }
 
     #[test]
     fn test_entry_kind_match() {
